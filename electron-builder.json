@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.opsagent.app",
+  "productName": "OpsAgent",
+  "directories": {
+    "buildResources": "resources",
+    "output": "dist"
+  },
+  "files": [
+    "out/**/*",
+    "resources/**/*",
+    "package.json"
+  ],
+  "asarUnpack": [
+    "**/*.{node,dll}",
+    "node_modules/better-sqlite3/**/*",
+    "node_modules/ssh2/**/*"
+  ],
+  "win": {
+    "target": [
+      { "target": "dir", "arch": ["x64"] }
+    ],
+    "signAndEditExecutable": false,
+    "artifactName": "OpsAgent-${version}-${arch}.${ext}"
+  },
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+    "artifactName": "OpsAgent-${version}-${arch}.${ext}",
+    "category": "public.app-category.developer-tools"
+  },
+  "linux": {
+    "target": [{ "target": "AppImage", "arch": ["x64"] }],
+    "artifactName": "OpsAgent-${version}-${arch}.${ext}",
+    "category": "Development"
+  }
+}
