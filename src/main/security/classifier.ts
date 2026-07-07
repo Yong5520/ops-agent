@@ -26,7 +26,6 @@ const READ_COMMANDS = [
   'wc',
   'file',
   'stat',
-  'find',
   'locate',
   'tree',
   'du',
@@ -37,7 +36,6 @@ const READ_COMMANDS = [
   'fgrep',
   'rg',
   'ack',
-  'awk',
   'cut',
   'sort',
   'uniq',
@@ -179,6 +177,26 @@ const MUTATION_SUBCOMMANDS =
 // Rejects: 2>&1, 1>&2, >&2, 2>&-
 const REDIRECTION_PATTERN = />>?(?!\s*&)\s*\S/;
 
+// Redirect to /dev/null is a null-sink — suppresses output (commonly stderr
+// via `2>/dev/null`) without modifying any file or system state. Such
+// redirections must NOT force WRITE classification, otherwise read-only
+// diagnostic pipelines like `lspci -vvv 2>/dev/null | grep ... | head` get
+// misclassified as WRITE and force unnecessary approval in Operator mode.
+// Empirically confirmed via audit_logs session d6372529 (2026-07-07).
+const NULL_REDIRECTION_PATTERN = /\s*[&\d]*>>?\s*\/dev\/null\b/g;
+
+// Shell metacharacters that can execute arbitrary commands or inject
+// multi-line content. Their presence forces WRITE classification so
+// Operator mode prompts for approval — even if the outer command name
+// looks read-only (e.g., `cat <<EOF | bash`, `echo "$(rm -rf /)"`).
+//
+// - << (heredoc): injects multi-line content, often piped to a shell
+// - <<< (here-string): single-line variant
+// - <( ... ) (process substitution): executes a command, feeds as file
+// - $( ... ) (command substitution): executes a command inline
+// - ` ... ` (backtick substitution): legacy form of $()
+const SHELL_METACHAR_PATTERN = /<<<?\s*['"]?-?\s*\w|<\([^)]+\)|\$\([^)]+\)|`[^`]+`/;
+
 // Dual-purpose commands whose READ/WRITE nature depends on subcommand.
 // If writePattern matches the full command, classify as WRITE; otherwise READ.
 // Order does not matter; only one entry matches a given command name.
@@ -235,6 +253,16 @@ const DUAL_PURPOSE: Array<{ names: string[]; writePattern: RegExp }> = [
     names: ['sed'],
     writePattern: /(\s-i\b|\s-i\S|--in-place\b)/i,
   },
+  // find: -exec / -execdir / -ok → WRITE (executes arbitrary commands); default → READ
+  {
+    names: ['find'],
+    writePattern: /\s(-exec|-execdir|-ok)\b/i,
+  },
+  // awk: system() / | getline / printf to pipe → WRITE (can execute commands); default → READ
+  {
+    names: ['awk', 'gawk', 'mawk'],
+    writePattern: /(system\s*\(|\|\s*getline)/i,
+  },
 ];
 
 export function classifyCommand(command: string): CommandType {
@@ -247,8 +275,23 @@ export function classifyCommand(command: string): CommandType {
   // su -c '...' → SUDO equivalent
   if (/^su(\s|$)/i.test(trimmed)) return 'SUDO';
 
-  // Output redirection to a file → WRITE
-  if (REDIRECTION_PATTERN.test(trimmed)) return 'WRITE';
+  // Output redirection to a file → WRITE.
+  // Exception: redirection only to /dev/null is a null-sink (no state
+  // change). Strip all /dev/null redirects; if any real file redirect
+  // remains → WRITE, otherwise fall through to command-name classification.
+  // Keeps read-only pipelines like `lspci -vvv 2>/dev/null | grep ... | head`
+  // classified as READ. (Empirically confirmed via audit_logs session d6372529.)
+  if (REDIRECTION_PATTERN.test(trimmed)) {
+    const withoutNull = trimmed.replace(NULL_REDIRECTION_PATTERN, '');
+    if (REDIRECTION_PATTERN.test(withoutNull)) return 'WRITE';
+  }
+
+  // Shell metacharacters (heredoc, process substitution, command
+  // substitution) → WRITE. These can execute arbitrary commands or
+  // inject multi-line content; forcing approval gives the user a chance
+  // to inspect. The engine's extractSubshellCommands further checks the
+  // inner content against blocked rules.
+  if (SHELL_METACHAR_PATTERN.test(trimmed)) return 'WRITE';
 
   // Tokenize for command-name and argument-structure checks
   const tokens = trimmed.split(/\s+/);

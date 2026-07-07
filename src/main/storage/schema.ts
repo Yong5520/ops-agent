@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
 CREATE TABLE IF NOT EXISTS sessions (
   id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
   title       TEXT,
-  host_id     TEXT REFERENCES hosts(id),
+  host_id     TEXT REFERENCES hosts(id) ON DELETE SET NULL,
   host_ids    TEXT,
   safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot')),
   status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   message_id      TEXT REFERENCES messages(id),
   tool_name       TEXT NOT NULL,
-  host_id         TEXT REFERENCES hosts(id),
+  host_id         TEXT REFERENCES hosts(id) ON DELETE SET NULL,
   command         TEXT,
   description     TEXT,
   command_type    TEXT NOT NULL DEFAULT 'READ' CHECK (command_type IN ('READ', 'WRITE', 'SUDO', 'BLOCKED')),
@@ -81,8 +81,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_host ON tool_calls(host_id, created_at
 -- 4.6 审计日志
 CREATE TABLE IF NOT EXISTS audit_logs (
   id              TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-  session_id      TEXT REFERENCES sessions(id),
-  host_id         TEXT REFERENCES hosts(id),
+  session_id      TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  host_id         TEXT REFERENCES hosts(id) ON DELETE SET NULL,
   host_name       TEXT NOT NULL,
   host_ip         TEXT NOT NULL,
   safety_mode     TEXT NOT NULL,
@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS custom_rules (
   type        TEXT NOT NULL CHECK (type IN ('blocked', 'allowed')),
   pattern     TEXT NOT NULL,
   reason      TEXT NOT NULL,
-  host_id     TEXT REFERENCES hosts(id),
+  host_id     TEXT REFERENCES hosts(id) ON DELETE CASCADE,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_custom_rules_host ON custom_rules(host_id);

@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback, memo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message } from '../../../shared/types.js';
 import type { ToolCallCard as ToolCallCardData } from '../../store/agentStore.js';
 import { CommandCard } from '../../components/CommandCard.js';
@@ -19,15 +20,59 @@ export function MessageList({
   isRunning,
   onEditMessage,
 }: MessageListProps) {
+  const parentRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const isAtBottomRef = useRef(true);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 120,
+    overscan: 5,
+    getItemKey: (index) => messages[index]?.id ?? index,
+  });
+
+  const handleScroll = useCallback(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const threshold = 60;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    isAtBottomRef.current = atBottom;
+    setShowScrollToBottom(!atBottom);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
+    isAtBottomRef.current = true;
+    setShowScrollToBottom(false);
+  }, []);
+
+  // Debounced auto-scroll — only scroll when new content arrives AND user
+  // is already at the bottom. Debouncing prevents layout thrashing during
+  // fast streaming output (every 100ms instead of every token).
+  useEffect(() => {
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = setTimeout(() => {
+      if (isAtBottomRef.current) {
+        endRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
+    }, 100);
+    return () => {
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
   }, [messages, streamingText, toolCards]);
 
+  const items = virtualizer.getVirtualItems();
+
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-4 p-6">
+    <div
+      ref={parentRef}
+      onScroll={handleScroll}
+      className="relative flex-1 min-h-0 overflow-y-auto"
+    >
+      <div className="mx-auto max-w-3xl p-6">
         {messages.length === 0 && !isRunning && (
           <div className="flex h-full flex-col items-center justify-center pt-20 text-center text-zinc-600">
             <div className="text-4xl mb-3">🤖</div>
@@ -36,16 +81,44 @@ export function MessageList({
           </div>
         )}
 
-        {messages.map((msg) => (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            canEdit={!!onEditMessage && !isRunning}
-            onEdit={onEditMessage}
-          />
-        ))}
+        {/* Virtualized message list */}
+        {messages.length > 0 && (
+          <div
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              position: 'relative',
+            }}
+          >
+            {items.map((vi) => {
+              const msg = messages[vi.index];
+              if (!msg) return null;
+              return (
+                <div
+                  key={msg.id}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${vi.start}px)`,
+                  }}
+                >
+                  <div className="pb-4">
+                    <MessageBubble
+                      message={msg}
+                      canEdit={!!onEditMessage && !isRunning}
+                      onEdit={onEditMessage}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
-        {/* Tool call cards (shown during current run) */}
+        {/* Tool call cards (non-virtualized — always visible during run) */}
         {toolCards.length > 0 && (
           <div className="space-y-1">
             {toolCards.map((card) => (
@@ -56,7 +129,7 @@ export function MessageList({
 
         {/* Streaming assistant text */}
         {streamingText && (
-          <div className="flex justify-end">
+          <div className="flex justify-end pt-4">
             <div className="max-w-[85%] rounded-lg rounded-br-sm bg-zinc-800 px-4 py-2.5">
               <MarkdownRenderer content={streamingText} />
               <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-zinc-400 align-middle" />
@@ -65,7 +138,7 @@ export function MessageList({
         )}
 
         {/* Running indicator */}
-        {isRunning && !streamingText && toolCards.length === 0 && (
+        {isRunning && !streamingText && toolCards.length === 0 && messages.length === 0 && (
           <div className="flex items-center gap-2 text-sm text-zinc-500">
             <span className="flex gap-1">
               <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
@@ -78,6 +151,20 @@ export function MessageList({
 
         <div ref={endRef} />
       </div>
+
+      {/* Scroll-to-bottom button */}
+      {showScrollToBottom && (
+        <button
+          onClick={scrollToBottom}
+          className="sticky bottom-4 left-full mr-4 flex h-9 w-9 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-zinc-400 shadow-lg hover:bg-zinc-800 hover:text-zinc-100"
+          title="回到底部"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14" />
+            <path d="m19 12-7 7-7-7" />
+          </svg>
+        </button>
+      )}
     </div>
   );
 }
@@ -88,7 +175,9 @@ interface MessageBubbleProps {
   onEdit?: (message: Message) => void;
 }
 
-function MessageBubble({ message, canEdit, onEdit }: MessageBubbleProps) {
+// Memoized to prevent re-rendering on every streaming token change.
+// Only re-renders when the message itself changes.
+const MessageBubble = memo(function MessageBubble({ message, canEdit, onEdit }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
@@ -149,4 +238,4 @@ function MessageBubble({ message, canEdit, onEdit }: MessageBubbleProps) {
       </div>
     </div>
   );
-}
+});

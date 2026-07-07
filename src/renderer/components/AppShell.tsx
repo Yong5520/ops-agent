@@ -6,6 +6,7 @@ interface AppShellProps {
 }
 
 const NAV_ITEMS = [
+  { to: '/dashboard', label: '仪表盘', icon: 'dashboard' },
   { to: '/chat', label: '对话', icon: 'chat' },
   { to: '/settings', label: '设置', icon: 'settings' },
   { to: '/audit', label: '审计', icon: 'audit' },
@@ -14,6 +15,21 @@ const NAV_ITEMS = [
 function NavIcon({ name }: { name: string }) {
   const common = 'h-4 w-4';
   switch (name) {
+    case 'dashboard':
+      return (
+        <svg
+          className={common}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <rect x="3" y="3" width="7" height="7" rx="1" />
+          <rect x="14" y="3" width="7" height="7" rx="1" />
+          <rect x="3" y="14" width="7" height="7" rx="1" />
+          <rect x="14" y="14" width="7" height="7" rx="1" />
+        </svg>
+      );
     case 'chat':
       return (
         <svg

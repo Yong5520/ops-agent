@@ -9,6 +9,7 @@ import { settingsStore } from '../storage/settings.js';
 import { customRulesStore } from '../storage/custom-rules.js';
 import { runAgentLoop } from '../agent/loop.js';
 import { exportSessionToMarkdown } from '../agent/export.js';
+import { connectionPool } from '../ssh/index.js';
 import type { AuthorizationResponse } from '../agent/types.js';
 import type { AgentRunRequest, AgentAuthorizationResponse } from './preload-api.js';
 
@@ -39,10 +40,23 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Hosts.LIST, async () => hostsStore.list());
   ipcMain.handle(Channels.Hosts.GET, async (_e, id: string) => hostsStore.get(id));
   ipcMain.handle(Channels.Hosts.CREATE, async (_e, payload) => hostsStore.create(payload));
-  ipcMain.handle(Channels.Hosts.UPDATE, async (_e, id: string, payload) =>
-    hostsStore.update(id, payload),
-  );
+  ipcMain.handle(Channels.Hosts.UPDATE, async (_e, id: string, payload) => {
+    const result = hostsStore.update(id, payload);
+    // Invalidate the cached connection and reset the circuit breaker
+    // so the new config takes effect immediately.
+    connectionPool.invalidate(id);
+    return result;
+  });
   ipcMain.handle(Channels.Hosts.DELETE, async (_e, id: string) => hostsStore.delete(id));
+  ipcMain.handle(Channels.Hosts.TEST_CONNECTION, async (_e, id: string) => {
+    try {
+      const result = await connectionPool.testConnection(id);
+      return { ok: true, latencyMs: result.latencyMs };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+  ipcMain.handle(Channels.Hosts.LIST_STATUS, async () => connectionPool.listStatus());
 
   // ---------- Models ----------
   ipcMain.handle(Channels.Models.LIST, async () => modelsStore.list());
@@ -213,6 +227,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         resolver({
           approved: response.approved,
           reason: response.reason,
+          backup: response.backup,
         });
       } else {
         logger.warn(

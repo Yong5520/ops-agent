@@ -56,9 +56,7 @@ export function SessionSidebar() {
           <div>
             <label className="mb-1 block text-xs text-zinc-500">目标主机（可多选）</label>
             <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900 p-1.5">
-              {hosts.length === 0 && (
-                <p className="px-1 py-1 text-xs text-zinc-600">未配置主机</p>
-              )}
+              {hosts.length === 0 && <p className="px-1 py-1 text-xs text-zinc-600">未配置主机</p>}
               {hosts.map((h) => {
                 const checked = hostIds.includes(h.id);
                 return (
@@ -114,8 +112,12 @@ export function SessionSidebar() {
             session={s}
             isActive={currentSession?.id === s.id}
             onSelect={() => selectSession(s.id)}
-            onDelete={() => {
-              if (confirm('删除此会话？')) deleteSession(s.id);
+            onDelete={async () => {
+              if (confirm('删除此会话？')) {
+                // Await so IPC rejection is caught by the store's try/catch
+                // instead of becoming an unhandled promise rejection.
+                await deleteSession(s.id);
+              }
             }}
             onRename={(title) => renameSession(s.id, title)}
           />
@@ -133,7 +135,13 @@ interface SessionListItemProps {
   onRename: (title: string) => void;
 }
 
-function SessionListItem({ session, isActive, onSelect, onDelete, onRename }: SessionListItemProps) {
+function SessionListItem({
+  session,
+  isActive,
+  onSelect,
+  onDelete,
+  onRename,
+}: SessionListItemProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
 
@@ -205,11 +213,7 @@ function SessionListItem({ session, isActive, onSelect, onDelete, onRename }: Se
       </div>
       {!editing && (
         <div className="ml-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-          <button
-            onClick={startEdit}
-            title="重命名"
-            className="text-zinc-600 hover:text-zinc-300"
-          >
+          <button onClick={startEdit} title="重命名" className="text-zinc-600 hover:text-zinc-300">
             <svg
               width="13"
               height="13"

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { SessionSidebar } from './SessionSidebar.js';
 import { MessageList } from './MessageList.js';
 import { MessageInput } from './MessageInput.js';
@@ -11,14 +11,8 @@ import { Button } from '../../components/Button.js';
 import type { Message } from '../../../shared/types.js';
 
 export function ChatPage() {
-  const {
-    currentSession,
-    messages,
-    hostIds,
-    safetyMode,
-    createSession,
-    truncateMessagesAfter,
-  } = useSessionStore();
+  const { currentSession, messages, hostIds, safetyMode, createSession, truncateMessagesAfter } =
+    useSessionStore();
   const { isRunning, streamingText, toolCards, error, startRun, cancelRun, clearError } =
     useAgentStore();
   const { activeProvider, load: loadModels } = useModelStore();
@@ -55,13 +49,16 @@ export function ChatPage() {
     });
   };
 
-  const handleEdit = async (message: Message) => {
-    // Truncate the edited message and everything after it from the DB + local
-    // array. After this, the textarea will be prefilled with the original
-    // content and the user can tweak + re-send.
-    await truncateMessagesAfter(message.id);
-    setEditFromMessage({ ...message });
-  };
+  const handleEdit = useCallback(
+    async (message: Message) => {
+      // Truncate the edited message and everything after it from the DB + local
+      // array. After this, the textarea will be prefilled with the original
+      // content and the user can tweak + re-send.
+      await truncateMessagesAfter(message.id);
+      setEditFromMessage({ ...message });
+    },
+    [truncateMessagesAfter],
+  );
 
   const handleExport = async () => {
     if (!currentSession) return;

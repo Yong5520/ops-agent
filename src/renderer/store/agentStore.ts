@@ -29,6 +29,7 @@ export interface PendingAuthorization {
   description?: string;
   commandType: 'READ' | 'WRITE' | 'SUDO' | 'BLOCKED';
   safetyMode: SafetyMode;
+  backupPaths?: string[];
 }
 
 interface AgentStore {
@@ -51,13 +52,42 @@ interface AgentStore {
     safetyMode: SafetyMode;
   }) => Promise<void>;
   cancelRun: (sessionId: string) => Promise<void>;
-  respondAuth: (toolCallId: string, approved: boolean, reason?: string) => Promise<void>;
+  respondAuth: (
+    toolCallId: string,
+    approved: boolean,
+    reason?: string,
+    backup?: boolean,
+  ) => Promise<void>;
   reset: () => void;
   clearError: () => void;
 }
 
 // Unsubscribe functions for IPC event listeners
 let unsubscribers: Array<() => void> = [];
+
+// Auto-name a session from the first user message if it has no title.
+// Called after the first agent exchange completes. Simple truncation —
+// no AI involvement (reliable, always works). Non-fatal: if the IPC
+// update fails, the session simply keeps its default title.
+async function autoNameSession(sessionId: string, userMessage: string): Promise<void> {
+  const { currentSession } = useSessionStore.getState();
+  // Only auto-name if this is the current session and it has no title yet.
+  if (!currentSession || currentSession.id !== sessionId || currentSession.title) {
+    return;
+  }
+  const autoTitle = userMessage.slice(0, 40).replace(/\s+/g, ' ').trim() || '新会话';
+  try {
+    const updated = await window.opsAgent.sessions.update(sessionId, { title: autoTitle });
+    // Refresh both currentSession and the sessions list so the sidebar
+    // reflects the new title immediately.
+    useSessionStore.setState({
+      currentSession: updated,
+      sessions: useSessionStore.getState().sessions.map((s) => (s.id === sessionId ? updated : s)),
+    });
+  } catch {
+    // Non-fatal — session keeps default title
+  }
+}
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   isRunning: false,
@@ -99,24 +129,34 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       window.opsAgent.agent.onToolResult((event) => {
         if (event.sessionId !== params.sessionId) return;
         set({
-          toolCards: get().toolCards.map((c) =>
-            c.toolCallId === event.toolCallId
-              ? {
-                  ...c,
-                  status: event.success
-                    ? 'success'
-                    : event.authorization === 'blocked'
-                      ? 'blocked'
-                      : 'failed',
-                  stdout: event.stdout,
-                  stderr: event.stderr,
-                  exitCode: event.exitCode,
-                  durationMs: event.durationMs,
-                  blockedReason: event.blockedReason,
-                  authorization: event.authorization,
-                }
-              : c,
-          ),
+          toolCards: get().toolCards.map((c) => {
+            if (c.toolCallId !== event.toolCallId) return c;
+            // Partial results: append stdout/stderr to the existing card
+            // for streaming output. Don't change the status — only the final
+            // (non-partial) result sets the final status/exitCode.
+            if (event.partial) {
+              return {
+                ...c,
+                stdout: event.stdout ? (c.stdout ?? '') + event.stdout : c.stdout,
+                stderr: event.stderr ? (c.stderr ?? '') + event.stderr : c.stderr,
+              };
+            }
+            // Final result: replace with complete data
+            return {
+              ...c,
+              status: event.success
+                ? 'success'
+                : event.authorization === 'blocked'
+                  ? 'blocked'
+                  : 'failed',
+              stdout: event.stdout,
+              stderr: event.stderr,
+              exitCode: event.exitCode,
+              durationMs: event.durationMs,
+              blockedReason: event.blockedReason,
+              authorization: event.authorization,
+            };
+          }),
         });
       }),
     );
@@ -136,6 +176,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               description: event.description,
               commandType: event.commandType,
               safetyMode: event.safetyMode,
+              backupPaths: event.backupPaths,
             },
           ],
         });
@@ -160,6 +201,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         set({ isRunning: false, streamingText: '', toolCards: [] });
         for (const unsub of unsubscribers) unsub();
         unsubscribers = [];
+
+        // Auto-name session from first user message if untitled.
+        // Fires after UI cleanup so the screen updates immediately.
+        // Simple truncation — no AI involvement (reliable, always works).
+        void autoNameSession(params.sessionId, params.userMessage);
       }),
     );
 
@@ -229,8 +275,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
 
-  respondAuth: async (toolCallId, approved, reason) => {
-    await window.opsAgent.agent.respondAuthorization({ toolCallId, approved, reason });
+  respondAuth: async (toolCallId, approved, reason, backup) => {
+    await window.opsAgent.agent.respondAuthorization({ toolCallId, approved, reason, backup });
     // Remove from pending list
     set({ pendingAuths: get().pendingAuths.filter((a) => a.toolCallId !== toolCallId) });
     // Update tool card status

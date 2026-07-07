@@ -125,7 +125,19 @@ export const sessionsStore = {
   },
 
   deleteSession(id: string): void {
-    getDb().prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    // Delete in a transaction. audit_logs.session_id lacks ON DELETE CASCADE
+    // (legacy schema), so we must manually remove its rows first — otherwise
+    // the FOREIGN KEY constraint fails and the session is not deleted.
+    // messages and tool_calls have ON DELETE CASCADE but we delete them
+    // explicitly too for defense-in-depth across schema versions.
+    const db = getDb();
+    const tx = db.transaction(() => {
+      db.prepare('DELETE FROM audit_logs WHERE session_id = ?').run(id);
+      db.prepare('DELETE FROM tool_calls WHERE session_id = ?').run(id);
+      db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    });
+    tx();
   },
 
   // ---------- Messages ----------

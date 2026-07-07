@@ -76,13 +76,19 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   deleteSession: async (id) => {
-    await window.opsAgent.sessions.remove(id);
-    const remaining = get().sessions.filter((s) => s.id !== id);
-    set({
-      sessions: remaining,
-      currentSession: get().currentSession?.id === id ? null : get().currentSession,
-      messages: get().currentSession?.id === id ? [] : get().messages,
-    });
+    try {
+      await window.opsAgent.sessions.remove(id);
+      const remaining = get().sessions.filter((s) => s.id !== id);
+      set({
+        sessions: remaining,
+        currentSession: get().currentSession?.id === id ? null : get().currentSession,
+        messages: get().currentSession?.id === id ? [] : get().messages,
+      });
+    } catch (err) {
+      // Surface IPC failures instead of letting them become unhandled
+      // rejections that silently leave the session in the sidebar.
+      set({ error: `删除会话失败: ${(err as Error).message}` });
+    }
   },
 
   setHostIds: (hostIds) => {

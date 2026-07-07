@@ -31,6 +31,28 @@ export function splitCommandChain(command: string): string[] {
   return segments.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
+// ── Subshell content extraction ──────────────────────────────────────────
+
+// Extract the inner content of $(...) and `...` substitutions so the
+// security engine can check them against blocked rules independently.
+// Without this, `echo "$(rm -rf /)"` would only be checked as `echo ...`
+// and the dangerous rm inside the substitution would be invisible.
+//
+// Nested substitutions are not expanded — we extract only the top-level
+// content, which is sufficient for the common evasion patterns.
+export function extractSubshellCommands(command: string): string[] {
+  const commands: string[] = [];
+  // Match $( ... ) — non-greedy to stop at the first closing paren
+  for (const m of command.matchAll(/\$\(([^)]+)\)/g)) {
+    commands.push(m[1].trim());
+  }
+  // Match ` ... ` backtick substitution
+  for (const m of command.matchAll(/`([^`]+)`/g)) {
+    commands.push(m[1].trim());
+  }
+  return commands.filter((s) => s.length > 0);
+}
+
 // ── Custom rule loading ───────────────────────────────────────────────────
 
 // Convert DB-backed custom rules into raw rules for compilation.
@@ -135,6 +157,24 @@ export function checkCommandSecurity(
           severity: rule.severity,
         };
       }
+    }
+  }
+
+  // 3. Extract and check the inner content of $(...) and `...`
+  //    substitutions. A command like `echo "$(rm -rf /)"` looks benign
+  //    on the surface, but the substitution executes `rm -rf /`. We
+  //    re-run each extracted subshell command through the full security
+  //    check so nested dangerous commands are caught.
+  const subshellCommands = extractSubshellCommands(command);
+  for (const sub of subshellCommands) {
+    const subResult = checkCommandSecurity(sub, hostId, config);
+    if (!subResult.allowed) {
+      return {
+        allowed: false,
+        reason: `命令替换中包含被拦截的操作: ${subResult.reason}`,
+        commandType: 'BLOCKED',
+        severity: subResult.severity,
+      };
     }
   }
 

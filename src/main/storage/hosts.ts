@@ -133,7 +133,20 @@ export const hostsStore = {
   },
 
   delete(id: string): void {
-    getDb().prepare('DELETE FROM hosts WHERE id = ?').run(id);
+    // Delete in a transaction. Multiple tables reference hosts(id) via
+    // foreign key but lack ON DELETE SET NULL/CASCADE (legacy schema).
+    // We preserve audit/tool-call history by nulling host_id rather than
+    // deleting rows. host_name/host_ip in audit_logs are plain TEXT so the
+    // audit trail remains readable. Custom rules are host-specific → delete.
+    const db = getDb();
+    const tx = db.transaction(() => {
+      db.prepare('UPDATE sessions SET host_id = NULL WHERE host_id = ?').run(id);
+      db.prepare('UPDATE tool_calls SET host_id = NULL WHERE host_id = ?').run(id);
+      db.prepare('UPDATE audit_logs SET host_id = NULL WHERE host_id = ?').run(id);
+      db.prepare('DELETE FROM custom_rules WHERE host_id = ?').run(id);
+      db.prepare('DELETE FROM hosts WHERE id = ?').run(id);
+    });
+    tx();
   },
 
   getByName(name: string): HostConfig | null {

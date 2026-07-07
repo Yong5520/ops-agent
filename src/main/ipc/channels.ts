@@ -10,6 +10,8 @@ export const Channels = {
     CREATE: 'hosts:create',
     UPDATE: 'hosts:update',
     DELETE: 'hosts:delete',
+    TEST_CONNECTION: 'hosts:testConnection',
+    LIST_STATUS: 'hosts:listStatus',
   },
   Models: {
     LIST: 'models:list',

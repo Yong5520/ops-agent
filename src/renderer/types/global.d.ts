@@ -56,6 +56,7 @@ interface AgentToolResultEvent {
   durationMs?: number;
   blockedReason?: string;
   authorization: 'auto' | 'approved' | 'rejected' | 'blocked';
+  partial?: boolean;
 }
 
 interface AgentAuthorizationRequest {
@@ -68,12 +69,14 @@ interface AgentAuthorizationRequest {
   description?: string;
   commandType: 'READ' | 'WRITE' | 'SUDO' | 'BLOCKED';
   safetyMode: SafetyMode;
+  backupPaths?: string[];
 }
 
 interface AgentAuthorizationResponse {
   toolCallId: string;
   approved: boolean;
   reason?: string;
+  backup?: boolean;
 }
 
 interface AgentCompleteEvent {
@@ -94,6 +97,16 @@ interface OpsAgentApi {
     create: (payload: HostInput) => Promise<HostConfig>;
     update: (id: string, payload: Partial<HostInput>) => Promise<HostConfig>;
     remove: (id: string) => Promise<void>;
+    testConnection: (id: string) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+    listStatus: () => Promise<
+      Array<{
+        hostId: string;
+        hostName: string;
+        state: string;
+        circuit: 'closed' | 'open' | 'half-open';
+        circuitReason?: string;
+      }>
+    >;
   };
   models: {
     list: () => Promise<ModelProvider[]>;

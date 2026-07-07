@@ -1,6 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import { cn } from '../lib/cn.js';
 
 // Markdown renderer for AI assistant responses.
@@ -12,7 +12,10 @@ interface MarkdownRendererProps {
   className?: string;
 }
 
-export function MarkdownRenderer({ content, className }: MarkdownRendererProps) {
+export const MarkdownRenderer = memo(function MarkdownRenderer({
+  content,
+  className,
+}: MarkdownRendererProps) {
   return (
     <div className={cn('markdown-body text-sm text-zinc-100', className)}>
       <ReactMarkdown
@@ -110,7 +113,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 // Code block with copy button and language label.
 function CodeBlock({ language, children }: { language: string; children: string }) {

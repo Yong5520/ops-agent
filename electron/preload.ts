@@ -12,6 +12,8 @@ const api: OpsAgentApi = {
     create: (payload) => ipcRenderer.invoke('hosts:create', payload),
     update: (id, payload) => ipcRenderer.invoke('hosts:update', id, payload),
     remove: (id: string) => ipcRenderer.invoke('hosts:delete', id),
+    testConnection: (id: string) => ipcRenderer.invoke('hosts:testConnection', id),
+    listStatus: () => ipcRenderer.invoke('hosts:listStatus'),
   },
 
   // Models

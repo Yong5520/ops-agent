@@ -11,6 +11,15 @@ const COMMAND_TYPES: Array<{ value: CommandType; label: string }> = [
   { value: 'BLOCKED', label: 'BLOCKED' },
 ];
 
+// Safety modes for the filter dropdown. Values must match the SafetyMode
+// union stored in audit_logs.safety_mode (lowercase English). Labels show
+// both Chinese and English so users can find the mode they ran in.
+const SAFETY_MODES: Array<{ value: SafetyMode; label: string }> = [
+  { value: 'sentinel', label: '诊断模式 (Sentinel)' },
+  { value: 'operator', label: '标准模式 (Operator)' },
+  { value: 'autopilot', label: '自主模式 (Autopilot)' },
+];
+
 const TYPE_STYLES: Record<string, string> = {
   READ: 'bg-zinc-800 text-zinc-300',
   WRITE: 'bg-amber-900 text-amber-300',
@@ -123,13 +132,22 @@ export function AuditPage() {
             onChange={(e) => setFilter({ ...filter, hostName: e.target.value || undefined })}
           />
 
-          <Input
-            placeholder="安全模式"
+          <Select
             value={filter.safetyMode ?? ''}
             onChange={(e) =>
-              setFilter({ ...filter, safetyMode: (e.target.value as SafetyMode) || undefined })
+              setFilter({
+                ...filter,
+                safetyMode: (e.target.value as SafetyMode) || undefined,
+              })
             }
-          />
+          >
+            <option value="">所有模式</option>
+            {SAFETY_MODES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </Select>
 
           <Input
             placeholder="关键词搜索"

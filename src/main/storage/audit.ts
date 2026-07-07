@@ -46,8 +46,10 @@ function buildQuery(filter: AuditFilter): { sql: string; params: unknown[] } {
     params.push(filter.hostId);
   }
   if (filter.hostName) {
-    where.push('host_name = ?');
-    params.push(filter.hostName);
+    // Fuzzy match: users type partial host names (e.g. "web" → "web-server-01").
+    // Exact-match `=` previously returned zero results for partial input.
+    where.push('host_name LIKE ?');
+    params.push(`%${filter.hostName}%`);
   }
   if (filter.safetyMode) {
     where.push('safety_mode = ?');

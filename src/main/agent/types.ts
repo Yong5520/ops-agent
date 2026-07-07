@@ -47,6 +47,9 @@ export interface ToolCallResult {
   durationMs?: number;
   blockedReason?: string;
   authorization: AuthorizationStatus;
+  // When true, this is an incremental chunk during streaming output —
+  // the UI should append to the existing card's output rather than replace.
+  partial?: boolean;
 }
 
 // Authorization request sent to UI when user confirmation is needed.
@@ -59,12 +62,20 @@ export interface AuthorizationRequest {
   description?: string;
   commandType: CommandType;
   safetyMode: SafetyMode;
+  // File paths that will be modified by this operation. When present,
+  // the AuthDialog shows a "backup before modification" checkbox. If the
+  // user checks it, the response includes backup: true and the system
+  // creates timestamped backups before executing.
+  backupPaths?: string[];
 }
 
 // User's response to an authorization request.
 export interface AuthorizationResponse {
   approved: boolean;
   reason?: string;
+  // When true, the user requested a backup before execution.
+  // The tool should create backups of backupPaths before proceeding.
+  backup?: boolean;
 }
 
 // Internal record for audit logging.

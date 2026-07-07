@@ -10,6 +10,7 @@ import {
   saveAssistantMessage,
 } from './context.js';
 import { hostsStore } from '../storage/hosts.js';
+import { gatherMultipleHostFacts } from './facts.js';
 import { logger } from '../utils/logger.js';
 import type { AgentLoopParams, SessionContext } from './types.js';
 
@@ -45,21 +46,31 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       defaultHost,
     };
 
-    // ── 2. Build system prompt ─────────────────────────────────────────────
+    // ── 2. Build system prompt (with runtime host facts) ──────────────────
+    // Gather facts for each selected host in parallel — this gives the AI
+    // immediate context (OS, kernel, failed services, disk usage) so it can
+    // skip the basic info-gathering tool calls and start diagnosing.
+    const hostInfos = hostIds
+      .map((id) => hostsStore.get(id))
+      .filter((h): h is NonNullable<typeof h> => h !== null)
+      .map((h) => ({ id: h.id, name: h.name }));
+    const hostFacts = await gatherMultipleHostFacts(hostInfos);
+
     const system = buildSystemPrompt({
       selectedHostIds: hostIds,
       safetyMode,
+      hostFacts,
     });
 
-    // ── 3. Load + compress message history ─────────────────────────────────
-    const history = compressContext(loadMessages(sessionId));
-    const messages = buildMessagesForCall(history, userMessage);
+    // ── 3. Get active model (needed before context compression) ───────────
+    const model = getActiveModel();
+
+    // ── 4. Load + compress message history ─────────────────────────────────
+    const history = await compressContext(loadMessages(sessionId), { sessionId, model });
+    let messages = buildMessagesForCall(history, userMessage);
 
     // Save user message immediately (assistant message saved after streaming)
     saveUserMessage(sessionId, userMessage);
-
-    // ── 4. Get active model ────────────────────────────────────────────────
-    const model = getActiveModel();
 
     // ── 5. Create tools ────────────────────────────────────────────────────
     const tools = createTools({
@@ -74,65 +85,149 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       `[Agent] Starting loop: session=${sessionId}, hosts=${hostIds.length}, mode=${safetyMode}, messages=${messages.length}`,
     );
 
-    // ── 6. Stream text ─────────────────────────────────────────────────────
-    const result = streamText({
-      model,
-      system,
-      messages,
-      tools,
-      maxSteps,
-      abortSignal,
-    });
-
+    // ── 6. Stream text (with conclusion-nudge loop) ───────────────────────
+    // Some models (e.g. glm-5.2) call tools then emit a short transitional
+    // phrase ("让我继续检查X") and finish with reason 'stop' — never
+    // producing a substantive conclusion. When we detect this stall pattern
+    // (tool calls happened + short text + transitional words), we nudge the
+    // model with an explicit "give your analysis" message and run another
+    // round. Capped at MAX_NUDGE_ROUNDS to prevent infinite loops.
+    // Empirically validated against session d6372529 (2026-07-07).
+    const MAX_NUDGE_ROUNDS = 2;
+    const STALL_TRANSITION_PATTERN = /让我|我来|继续|我先|接下来|下一步/;
+    const STALL_TEXT_THRESHOLD = 150;
+    let nudgeCount = 0;
+    let toolCallCount = 0;
+    let lastFinishReason = '';
     let fullText = '';
+    let stalled = true;
 
-    for await (const part of result.fullStream) {
-      // Check for cancellation between stream chunks. The abortSignal also
-      // propagates into the SDK, but this gives us a clean exit point.
-      if (abortSignal?.aborted) {
-        logger.info(
-          `[Agent] Loop aborted by user; preserving ${fullText.length} chars of partial text`,
-        );
-        break;
-      }
-      switch (part.type) {
-        case 'text-delta': {
-          const delta = part.textDelta;
-          fullText += delta;
-          params.onTextStream(delta);
+    while (stalled) {
+      toolCallCount = 0;
+      lastFinishReason = '';
+      let roundText = '';
+
+      const result = streamText({
+        model,
+        system,
+        messages,
+        tools,
+        maxSteps,
+        maxTokens: 8192,
+        abortSignal,
+      });
+
+      for await (const part of result.fullStream) {
+        // Check for cancellation between stream chunks. The abortSignal also
+        // propagates into the SDK, but this gives us a clean exit point.
+        if (abortSignal?.aborted) {
+          logger.info(
+            `[Agent] Loop aborted by user; preserving ${fullText.length + roundText.length} chars of partial text`,
+          );
           break;
         }
-
-        case 'error': {
-          const err = part.error as Error;
-          // AbortError arrives here when the signal fires mid-stream — treat
-          // it as a clean cancellation, not an error.
-          if (err.name === 'AbortError' || abortSignal?.aborted) {
-            logger.info(
-              `[Agent] Stream aborted; preserving partial text (${fullText.length} chars)`,
-            );
+        switch (part.type) {
+          case 'text-delta': {
+            const delta = part.textDelta;
+            roundText += delta;
+            params.onTextStream(delta);
             break;
           }
-          logger.error(`[Agent] Stream error: ${err.message}`);
-          // If we got no text at all, the error happened before any output —
-          // surface it to the user via onError instead of completing silently.
-          if (!fullText) {
-            throw err;
+
+          case 'tool-call': {
+            toolCallCount++;
+            break;
           }
-          // If we have partial text, let the loop complete with what we have.
-          break;
-        }
 
-        case 'finish': {
-          logger.info(`[Agent] Loop finished: ${part.usage?.totalTokens ?? 'unknown'} tokens`);
-          break;
-        }
+          case 'error': {
+            const err = part.error as Error;
+            // AbortError arrives here when the signal fires mid-stream — treat
+            // it as a clean cancellation, not an error.
+            if (err.name === 'AbortError' || abortSignal?.aborted) {
+              logger.info(
+                `[Agent] Stream aborted; preserving partial text (${roundText.length} chars)`,
+              );
+              break;
+            }
+            logger.error(`[Agent] Stream error: ${err.message}`);
+            // If we got no text at all, surface via onError.
+            if (!roundText && !fullText) {
+              throw err;
+            }
+            // Partial text exists: inline the error so the user sees the
+            // response was truncated, instead of silently completing.
+            roundText += `\n\n---\n⚠️ 响应中断: ${err.message}`;
+            break;
+          }
 
-        default:
-          // tool-call, tool-result, tool-input-start, etc. are handled inside
-          // each tool's execute function via onToolCall/onToolResult callbacks.
-          // We intentionally don't double-notify here.
-          break;
+          case 'finish': {
+            const reason = part.finishReason;
+            lastFinishReason = reason;
+            logger.info(
+              `[Agent] Loop finished: reason=${reason}, tokens=${part.usage?.totalTokens ?? 'unknown'}`,
+            );
+            if (reason === 'length') {
+              roundText += `\n\n---\n⚠️ Agent 达到输出长度限制，响应被截断。`;
+            } else if (reason === 'tool-calls') {
+              roundText += `\n\n---\n⚠️ Agent 达到最大步数限制 (${maxSteps})，仍有未完成的操作。可继续提问以延续。`;
+            } else if (reason === 'content-filter') {
+              roundText += `\n\n---\n⚠️ 响应被内容过滤器截断。`;
+            }
+            break;
+          }
+
+          default:
+            // tool-result, tool-input-start, etc. are handled inside each
+            // tool's execute function via onToolCall/onToolResult callbacks.
+            break;
+        }
+      }
+
+      fullText += roundText;
+
+      // Detect "inconclusive stop": model called tools but stopped without a
+      // substantive conclusion. Two stall patterns:
+      //  (a) short transitional phrase ("让我继续检查X") — text < threshold AND
+      //      matches transition words
+      //  (b) zero text after tool calls — model called tools, produced no
+      //      assistant text, and stopped (user sees only tool cards, no analysis)
+      const isTransitionStall =
+        roundText.length > 0 &&
+        roundText.length < STALL_TEXT_THRESHOLD &&
+        STALL_TRANSITION_PATTERN.test(roundText);
+      const isEmptyStall = roundText.length === 0;
+      stalled =
+        lastFinishReason === 'stop' &&
+        toolCallCount > 0 &&
+        (isTransitionStall || isEmptyStall) &&
+        nudgeCount < MAX_NUDGE_ROUNDS &&
+        !abortSignal?.aborted;
+
+      if (stalled) {
+        nudgeCount++;
+        logger.info(
+          `[Agent] Detected inconclusive stop (toolCalls=${toolCallCount}, text=${roundText.length} chars); nudging for conclusion, round ${nudgeCount}/${MAX_NUDGE_ROUNDS}`,
+        );
+
+        // CRITICAL: Use result.response.messages (not roundText) so the next
+        // round sees the full assistant message INCLUDING tool calls and tool
+        // results. Appending only roundText would strip tool context — the
+        // nudge message "基于以上已执行的命令结果" would reference results
+        // the model cannot see, risking hallucination or redundant re-runs.
+        // ResponseMessage[] = [CoreAssistantMessage (with tool calls), CoreToolMessage (with results)]
+        const response = await result.response;
+        messages = [
+          ...messages,
+          ...response.messages,
+          {
+            role: 'user' as const,
+            content:
+              '请基于以上已执行的命令结果，给出你的实质性分析结论。如果诊断信息已足够，请总结发现和结论；如果还需更多信息，请继续执行命令。不要只输出"让我继续检查"之类的声明。',
+          },
+        ];
+        // Visual separator in the streamed UI output between rounds.
+        fullText += '\n\n';
+        params.onTextStream('\n\n');
       }
     }
 
@@ -142,7 +237,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     }
 
     // ── 8. Complete ────────────────────────────────────────────────────────
-    logger.info(`[Agent] Loop complete: ${fullText.length} chars output`);
+    logger.info(`[Agent] Loop complete: ${fullText.length} chars output (nudges=${nudgeCount})`);
     params.onComplete(fullText);
   } catch (err) {
     const error = err as Error;

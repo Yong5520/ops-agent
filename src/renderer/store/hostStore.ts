@@ -39,8 +39,12 @@ export const useHostStore = create<HostStore>((set, get) => ({
   },
 
   remove: async (id) => {
-    await window.opsAgent.hosts.remove(id);
-    set({ hosts: get().hosts.filter((h) => h.id !== id) });
+    try {
+      await window.opsAgent.hosts.remove(id);
+      set({ hosts: get().hosts.filter((h) => h.id !== id) });
+    } catch (err) {
+      set({ error: `删除主机失败: ${(err as Error).message}` });
+    }
   },
 
   getByName: (name) => get().hosts.find((h) => h.name === name),
