@@ -230,6 +230,114 @@ describe('classifyCommand', () => {
     });
   });
 
+  describe('hardware diagnostics', () => {
+    const hwCmds = [
+      'nvidia-smi',
+      'nvidia-smi -q',
+      'nvidia-smi --query-gpu=name,driver_version --format=csv',
+      'smartctl -a /dev/sda',
+      'dmidecode -t memory',
+      'lshw -short',
+      'lsscsi',
+      'sensors',
+      'inxi -Fx',
+      'sg_ses /dev/sg0',
+    ];
+
+    for (const cmd of hwCmds) {
+      it(`classifies "${cmd}" as READ`, () => {
+        expect(classifyCommand(cmd)).toBe('READ');
+      });
+    }
+
+    // nvme dual-purpose: format/secure-erase -> WRITE; list/smart-log -> READ
+    it('classifies "nvme list" as READ', () => {
+      expect(classifyCommand('nvme list')).toBe('READ');
+    });
+    it('classifies "nvme smart-log /dev/nvme0" as READ', () => {
+      expect(classifyCommand('nvme smart-log /dev/nvme0')).toBe('READ');
+    });
+    it('classifies "nvme format /dev/nvme0" as WRITE', () => {
+      expect(classifyCommand('nvme format /dev/nvme0')).toBe('WRITE');
+    });
+
+    // udevadm dual-purpose: trigger/control -> WRITE; info/monitor -> READ
+    it('classifies "udevadm info /dev/sda" as READ', () => {
+      expect(classifyCommand('udevadm info /dev/sda')).toBe('READ');
+    });
+    it('classifies "udevadm trigger" as WRITE', () => {
+      expect(classifyCommand('udevadm trigger')).toBe('WRITE');
+    });
+  });
+
+  describe('pipe-aware classification', () => {
+    it('classifies all-READ pipe chain as READ', () => {
+      expect(classifyCommand('nvidia-smi -q | grep -i "Product Architecture"')).toBe('READ');
+    });
+
+    it('classifies nvidia-smi with grep and head as READ', () => {
+      expect(
+        classifyCommand('nvidia-smi -q | grep -i "Product Architecture\\|Product Name\\|GPU Part"'),
+      ).toBe('READ');
+    });
+
+    it('classifies lspci with null redirect and grep as READ', () => {
+      expect(classifyCommand('lspci -vvv 2>/dev/null | grep -i vga | head -5')).toBe('READ');
+    });
+
+    it('classifies ls | grep as READ', () => {
+      expect(classifyCommand('ls -la /var/log | grep error')).toBe('READ');
+    });
+
+    it('classifies cat | wc as READ', () => {
+      expect(classifyCommand('cat /var/log/syslog | wc -l')).toBe('READ');
+    });
+
+    it('classifies pipe with one WRITE segment as WRITE', () => {
+      expect(classifyCommand("ls | sed -i 's/a/b/'")).toBe('WRITE');
+    });
+
+    it('classifies pipe with tee as WRITE', () => {
+      expect(classifyCommand('ls | tee /tmp/out.txt')).toBe('WRITE');
+    });
+
+    it('classifies pipe with sudo segment as SUDO', () => {
+      expect(classifyCommand('ls | sudo tee /etc/config')).toBe('SUDO');
+    });
+
+    it('classifies && chain with one WRITE as WRITE', () => {
+      expect(classifyCommand('ls -la && rm /tmp/test')).toBe('WRITE');
+    });
+
+    it('classifies all-READ && chain as READ', () => {
+      expect(classifyCommand('ls -la && echo done')).toBe('READ');
+    });
+
+    it('classifies || chain correctly', () => {
+      expect(classifyCommand('grep foo file || echo notfound')).toBe('READ');
+    });
+
+    it('classifies semicolon chain with one WRITE as WRITE', () => {
+      expect(classifyCommand('ls; rm /tmp/x')).toBe('WRITE');
+    });
+
+    it('does NOT split pipe inside double quotes', () => {
+      expect(classifyCommand('grep "a|b" /etc/hosts')).toBe('READ');
+    });
+
+    it('does NOT split semicolon inside single quotes', () => {
+      expect(classifyCommand("awk '{print $1; print $2}' file")).toBe('READ');
+    });
+
+    it('does NOT split pipe inside single quotes', () => {
+      expect(classifyCommand("grep 'a\\|b' /etc/hosts")).toBe('READ');
+    });
+
+    it('handles mixed quotes and pipes', () => {
+      expect(classifyCommand('nvidia-smi -q | grep "a\\|b" | head -3')).toBe('READ');
+    });
+  });
+
   describe('edge cases', () => {
     it('classifies empty string as READ', () => {
       expect(classifyCommand('')).toBe('READ');

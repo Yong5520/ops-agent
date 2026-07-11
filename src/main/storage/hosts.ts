@@ -154,4 +154,59 @@ export const hostsStore = {
       HostRow | undefined;
     return row ? rowToConfig(row) : null;
   },
+
+  // Batch create multiple hosts in a single transaction.
+  // Returns { created, errors } where errors contains per-row failure info.
+  // On any DB constraint violation, only that row is skipped - others proceed.
+  batchCreate(payloads: HostInput[]): {
+    created: HostConfig[];
+    errors: Array<{ row: number; name: string; error: string }>;
+  } {
+    const created: HostConfig[] = [];
+    const errors: Array<{ row: number; name: string; error: string }> = [];
+
+    for (let i = 0; i < payloads.length; i++) {
+      const payload = payloads[i];
+      try {
+        const host = this.create(payload);
+        created.push(host);
+      } catch (err) {
+        errors.push({
+          row: i,
+          name: payload.name ?? `(row ${i})`,
+          error: (err as Error).message,
+        });
+      }
+    }
+    return { created, errors };
+  },
+
+  // Rename a host group: update all hosts with oldName to newName.
+  renameGroup(oldName: string, newName: string): number {
+    const db = getDb();
+    const result = db
+      .prepare("UPDATE hosts SET group_name = ?, updated_at = datetime('now') WHERE group_name = ?")
+      .run(newName, oldName);
+    return result.changes;
+  },
+
+  // Delete a host group: move all hosts in the group to 'default'.
+  deleteGroup(groupName: string): number {
+    if (groupName === 'default') return 0; // Cannot delete default group
+    const db = getDb();
+    const result = db
+      .prepare(
+        "UPDATE hosts SET group_name = 'default', updated_at = datetime('now') WHERE group_name = ?",
+      )
+      .run(groupName);
+    return result.changes;
+  },
+
+  // List all distinct group names.
+  listGroups(): string[] {
+    const rows = getDb()
+      .prepare('SELECT DISTINCT group_name FROM hosts ORDER BY group_name ASC')
+      .all() as Array<{ group_name: string }>;
+    return rows.map((r) => r.group_name);
+  },
 };

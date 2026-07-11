@@ -121,16 +121,17 @@ export function checkCommandSecurity(
   hostId: string | undefined,
   config: EffectiveSecurityConfig,
 ): SecurityCheckResult {
-  const commandType = classifyCommand(command);
+  let commandType = classifyCommand(command);
 
   // Look up host-level rule additions (merged on top of global rules).
   const hostOverride = hostId ? config.hostOverrides.get(hostId) : undefined;
   const effectiveBlocked = hostOverride?.blocked
     ? [...config.blocked, ...hostOverride.blocked]
     : config.blocked;
-  // Note: allowed-list whitelisting (strict/readonly modes from ssh-mcp-multi)
-  // is replaced by the three-tier SafetyMode system in modes.ts. The allowed
-  // list is still compiled and stored for future use but not consulted here.
+  // Build effective allowed rules (global + host-level overrides)
+  const effectiveAllowed = hostOverride?.allowed
+    ? [...config.allowed, ...hostOverride.allowed]
+    : config.allowed;
 
   // 1. Check full command against blocked list first — catches cross-pipe
   //    patterns like `base64 -d | bash`.
@@ -175,6 +176,18 @@ export function checkCommandSecurity(
         commandType: 'BLOCKED',
         severity: subResult.severity,
       };
+    }
+  }
+
+  // 4. Check allowed rules - downgrade WRITE to READ if the user has marked
+  //    the command (or a pattern matching it) as an allowed read-only command.
+  //    SUDO commands are never downgraded - they always require approval.
+  if (commandType === 'WRITE') {
+    for (const rule of effectiveAllowed) {
+      if (rule.pattern.test(command)) {
+        commandType = 'READ';
+        break;
+      }
     }
   }
 

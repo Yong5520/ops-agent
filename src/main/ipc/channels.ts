@@ -12,6 +12,10 @@ export const Channels = {
     DELETE: 'hosts:delete',
     TEST_CONNECTION: 'hosts:testConnection',
     LIST_STATUS: 'hosts:listStatus',
+    BATCH_CREATE: 'hosts:batchCreate',
+    RENAME_GROUP: 'hosts:renameGroup',
+    DELETE_GROUP: 'hosts:deleteGroup',
+    LIST_GROUPS: 'hosts:listGroups',
   },
   Models: {
     LIST: 'models:list',

@@ -10,6 +10,8 @@ interface MessageInputProps {
   onCancel: () => void;
   editFromMessage?: Message | null;
   onClearEdit?: () => void;
+  /** Called when user selects a host via @mention, so parent can bind it to hostIds */
+  onMentionHost?: (hostId: string) => void;
 }
 
 interface MentionState {
@@ -24,9 +26,14 @@ export function MessageInput({
   onCancel,
   editFromMessage,
   onClearEdit,
+  onMentionHost,
 }: MessageInputProps) {
   const [text, setText] = useState('');
-  const [mention, setMention] = useState<MentionState>({ active: false, query: '', startIndex: -1 });
+  const [mention, setMention] = useState<MentionState>({
+    active: false,
+    query: '',
+    startIndex: -1,
+  });
   const [mentionIndex, setMentionIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { hosts } = useHostStore();
@@ -95,6 +102,13 @@ export function MessageInput({
     const next = `${before}@${hostName} ${after}`;
     setText(next);
     setMention({ active: false, query: '', startIndex: -1 });
+
+    // Notify parent so the mentioned host gets bound to the session's hostIds
+    const matched = hosts.find((h) => h.name === hostName);
+    if (matched && onMentionHost) {
+      onMentionHost(matched.id);
+    }
+
     // Place caret right after the inserted "@host " so the user can keep typing
     const newCaret = before.length + hostName.length + 2; // +1 for @, +1 for space
     requestAnimationFrame(() => {

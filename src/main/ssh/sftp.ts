@@ -1,8 +1,11 @@
-import { existsSync, statSync, mkdirSync } from 'node:fs';
+import { createWriteStream, createReadStream, existsSync, statSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import type { PassThrough } from 'node:stream';
 import { OpsAgentError } from './connection.js';
 import type { SSHConnectionManager } from './connection.js';
 import type { SFTPWrapper } from 'ssh2';
+import type { ConnectionPool } from './pool.js';
 
 // SFTP operations — extracted from ssh-mcp-multi getSftp (lines 575-583) plus
 // the read-file / write-file / upload / download MCP tool implementations.
@@ -192,11 +195,41 @@ export interface TransferResult {
   localPath: string;
 }
 
-// Upload a local file to the remote host via SFTP fastPut.
+// Activity-based timeout: resets on each data chunk. Only fires when no data
+// flows for STALL_TIMEOUT ms (truly stalled connection).
+const STALL_TIMEOUT = 30_000;
+
+// Progress callback type: (bytesTransferred, totalBytes) => void
+export type ProgressCallback = (transferred: number, total: number) => void;
+
+// Transfer options: AbortSignal for cancellation, ConnectionPool for keepalive.
+export interface TransferOptions {
+  onProgress?: ProgressCallback;
+  signal?: AbortSignal;
+  pool?: ConnectionPool;
+  hostId?: string;
+}
+
+// Helper: set up abort signal listener that destroys streams on cancel
+function setupAbort(signal: AbortSignal | undefined, destroy: () => void): () => void {
+  if (!signal) return () => {};
+  if (signal.aborted) {
+    destroy();
+    return () => {};
+  }
+  const onAbort = () => destroy();
+  signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
+}
+
+// Upload a local file to the remote host via SFTP streaming.
+// Supports cancellation via AbortSignal and keeps the SSH connection alive
+// during long transfers by marking the pool active on each chunk.
 export async function uploadFile(
   manager: SSHConnectionManager,
   localPath: string,
   remotePath: string,
+  options?: TransferOptions,
 ): Promise<TransferResult> {
   if (!existsSync(localPath)) {
     throw new OpsAgentError(`Local file not found: ${localPath}`, 'INVALID_PARAMS');
@@ -204,46 +237,137 @@ export async function uploadFile(
   const fileSize = statSync(localPath).size;
   const sftp = await getSftp(manager);
 
-  return new Promise<TransferResult>((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(new OpsAgentError(`Upload timed out after ${manager.timeout}ms`, 'SSH_TIMEOUT'));
-    }, manager.timeout);
+  let bytesTransferred = 0;
+  let stallTimer: NodeJS.Timeout | null = null;
+  let readStream: ReturnType<typeof createReadStream> | null = null;
+  let writeStream: ReturnType<typeof sftp.createWriteStream> | null = null;
 
-    sftp.fastPut(localPath, remotePath, (err) => {
-      clearTimeout(timeoutId);
-      if (err) {
-        reject(new OpsAgentError(`Upload failed: ${err.message}`, 'SSH_ERROR'));
-      } else {
-        resolve({ bytesTransferred: fileSize, remotePath, localPath });
-      }
-    });
+  const resetStallTimer = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      readStream?.destroy();
+      writeStream?.destroy();
+    }, STALL_TIMEOUT);
+  };
+
+  if (options?.signal?.aborted) {
+    throw new OpsAgentError('Upload cancelled', 'SSH_ERROR');
+  }
+  const cleanupAbort = setupAbort(options?.signal, () => {
+    readStream?.destroy();
+    writeStream?.destroy();
   });
+
+  try {
+    readStream = createReadStream(localPath);
+    writeStream = sftp.createWriteStream(remotePath);
+    resetStallTimer();
+
+    readStream.on('data', (chunk: Buffer | string) => {
+      bytesTransferred += Buffer.byteLength(chunk);
+      resetStallTimer();
+      if (options?.pool && options?.hostId) {
+        options.pool.markActive(options.hostId);
+      }
+      options?.onProgress?.(bytesTransferred, fileSize);
+    });
+
+    await pipeline(readStream, writeStream as unknown as PassThrough);
+
+    if (stallTimer) clearTimeout(stallTimer);
+    cleanupAbort();
+    return { bytesTransferred, remotePath, localPath };
+  } catch (err) {
+    if (stallTimer) clearTimeout(stallTimer);
+    readStream?.destroy();
+    writeStream?.destroy();
+    cleanupAbort();
+    if (err instanceof OpsAgentError) throw err;
+    const errorMsg = (err as Error).message;
+    throw new OpsAgentError(`Upload failed: ${errorMsg}`, 'SSH_ERROR');
+  }
 }
 
-// Download a remote file to local via SFTP fastGet.
+// Download a remote file to local via SFTP streaming.
+// Supports cancellation via AbortSignal and keeps the SSH connection alive.
 export async function downloadFile(
   manager: SSHConnectionManager,
   remotePath: string,
   localPath: string,
+  options?: TransferOptions,
 ): Promise<TransferResult> {
   mkdirSync(dirname(localPath), { recursive: true });
   const sftp = await getSftp(manager);
 
-  return new Promise<TransferResult>((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(new OpsAgentError(`Download timed out after ${manager.timeout}ms`, 'SSH_TIMEOUT'));
-    }, manager.timeout);
-
-    sftp.fastGet(remotePath, localPath, (err) => {
-      clearTimeout(timeoutId);
-      if (err) {
-        reject(new OpsAgentError(`Download failed: ${err.message}`, 'SSH_ERROR'));
-      } else {
-        const fileSize = existsSync(localPath) ? statSync(localPath).size : 0;
-        resolve({ bytesTransferred: fileSize, remotePath, localPath });
-      }
+  // Get remote file size for progress calculation
+  let fileSize = 0;
+  try {
+    const stat = await new Promise<{ size: number }>((resolve, reject) => {
+      sftp.stat(remotePath, (err, stats) => {
+        if (err) {
+          reject(new OpsAgentError(`stat failed: ${err.message}`, 'SSH_ERROR'));
+        } else {
+          resolve({ size: stats.size });
+        }
+      });
     });
+    fileSize = stat.size;
+  } catch {
+    // If stat fails, proceed with unknown size
+  }
+
+  let bytesTransferred = 0;
+  let stallTimer: NodeJS.Timeout | null = null;
+  let readStream: ReturnType<typeof sftp.createReadStream> | null = null;
+  let writeStream: ReturnType<typeof createWriteStream> | null = null;
+
+  const resetStallTimer = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      readStream?.destroy();
+      writeStream?.destroy();
+    }, STALL_TIMEOUT);
+  };
+
+  if (options?.signal?.aborted) {
+    throw new OpsAgentError('Download cancelled', 'SSH_ERROR');
+  }
+  const cleanupAbort = setupAbort(options?.signal, () => {
+    readStream?.destroy();
+    writeStream?.destroy();
   });
+
+  try {
+    readStream = sftp.createReadStream(remotePath);
+    writeStream = createWriteStream(localPath);
+    resetStallTimer();
+
+    readStream.on('data', (chunk: Buffer | string) => {
+      bytesTransferred += Buffer.byteLength(chunk);
+      resetStallTimer();
+      if (options?.pool && options?.hostId) {
+        options.pool.markActive(options.hostId);
+      }
+      options?.onProgress?.(bytesTransferred, fileSize);
+    });
+
+    await pipeline(readStream as unknown as PassThrough, writeStream);
+
+    if (stallTimer) clearTimeout(stallTimer);
+    cleanupAbort();
+    if (fileSize === 0 && existsSync(localPath)) {
+      fileSize = statSync(localPath).size;
+    }
+    return { bytesTransferred: fileSize, remotePath, localPath };
+  } catch (err) {
+    if (stallTimer) clearTimeout(stallTimer);
+    readStream?.destroy();
+    writeStream?.destroy();
+    cleanupAbort();
+    if (err instanceof OpsAgentError) throw err;
+    const errorMsg = (err as Error).message;
+    throw new OpsAgentError(`Download failed: ${errorMsg}`, 'SSH_ERROR');
+  }
 }
 
 // ── list_dir (bonus utility) ──────────────────────────────────────────────

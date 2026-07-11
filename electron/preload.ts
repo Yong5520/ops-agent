@@ -14,6 +14,11 @@ const api: OpsAgentApi = {
     remove: (id: string) => ipcRenderer.invoke('hosts:delete', id),
     testConnection: (id: string) => ipcRenderer.invoke('hosts:testConnection', id),
     listStatus: () => ipcRenderer.invoke('hosts:listStatus'),
+    batchCreate: (payloads) => ipcRenderer.invoke('hosts:batchCreate', payloads),
+    renameGroup: (oldName: string, newName: string) =>
+      ipcRenderer.invoke('hosts:renameGroup', oldName, newName),
+    deleteGroup: (groupName: string) => ipcRenderer.invoke('hosts:deleteGroup', groupName),
+    listGroups: () => ipcRenderer.invoke('hosts:listGroups'),
   },
 
   // Models
@@ -103,6 +108,56 @@ const api: OpsAgentApi = {
       ipcRenderer.on('agent:error', listener);
       return () => ipcRenderer.removeListener('agent:error', listener);
     },
+  },
+
+  // Terminal (interactive SSH shell + local cmd)
+  terminal: {
+    start: (hostId: string) => ipcRenderer.invoke('terminal:start', hostId),
+    startLocal: () => ipcRenderer.invoke('terminal:startLocal'),
+    input: (sessionId: string, data: string) =>
+      ipcRenderer.invoke('terminal:input', sessionId, data),
+    resize: (sessionId: string, cols: number, rows: number) =>
+      ipcRenderer.invoke('terminal:resize', sessionId, cols, rows),
+    kill: (sessionId: string) => ipcRenderer.invoke('terminal:kill', sessionId),
+    onData: (handler) => {
+      const listener = (_e: unknown, sessionId: string, data: string) => handler(sessionId, data);
+      ipcRenderer.on('terminal:data', listener);
+      return () => ipcRenderer.removeListener('terminal:data', listener);
+    },
+    onExit: (handler) => {
+      const listener = (
+        _e: unknown,
+        sessionId: string,
+        info: { hostName: string; reason: string },
+      ) => handler(sessionId, info);
+      ipcRenderer.on('terminal:exit', listener);
+      return () => ipcRenderer.removeListener('terminal:exit', listener);
+    },
+  },
+
+  // SFTP (file transfer)
+  sftp: {
+    list: (hostId: string, remotePath: string) =>
+      ipcRenderer.invoke('sftp:list', hostId, remotePath),
+    upload: (hostId: string, localPath: string, remotePath: string, transferId: string) =>
+      ipcRenderer.invoke('sftp:upload', hostId, localPath, remotePath, transferId),
+    download: (hostId: string, remotePath: string, localPath: string, transferId: string) =>
+      ipcRenderer.invoke('sftp:download', hostId, remotePath, localPath, transferId),
+    realpath: (hostId: string) => ipcRenderer.invoke('sftp:realpath', hostId),
+    cancel: (transferId: string) => ipcRenderer.invoke('sftp:cancel', transferId),
+    onProgress: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('sftp:progress', listener);
+      return () => ipcRenderer.removeListener('sftp:progress', listener);
+    },
+  },
+
+  // Native file dialogs
+  dialog: {
+    saveFile: (defaultName: string, title?: string) =>
+      ipcRenderer.invoke('dialog:saveFile', defaultName, title),
+    openFile: () => ipcRenderer.invoke('dialog:openFile'),
   },
 };
 

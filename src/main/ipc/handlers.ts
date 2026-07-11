@@ -10,6 +10,7 @@ import { customRulesStore } from '../storage/custom-rules.js';
 import { runAgentLoop } from '../agent/loop.js';
 import { exportSessionToMarkdown } from '../agent/export.js';
 import { connectionPool } from '../ssh/index.js';
+import { registerTerminalHandlers, closeAllTerminals } from './terminal.js';
 import type { AuthorizationResponse } from '../agent/types.js';
 import type { AgentRunRequest, AgentAuthorizationResponse } from './preload-api.js';
 
@@ -57,6 +58,16 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     }
   });
   ipcMain.handle(Channels.Hosts.LIST_STATUS, async () => connectionPool.listStatus());
+  ipcMain.handle(Channels.Hosts.BATCH_CREATE, async (_e, payloads) =>
+    hostsStore.batchCreate(payloads),
+  );
+  ipcMain.handle(Channels.Hosts.RENAME_GROUP, async (_e, oldName: string, newName: string) =>
+    hostsStore.renameGroup(oldName, newName),
+  );
+  ipcMain.handle(Channels.Hosts.DELETE_GROUP, async (_e, groupName: string) =>
+    hostsStore.deleteGroup(groupName),
+  );
+  ipcMain.handle(Channels.Hosts.LIST_GROUPS, async () => hostsStore.listGroups());
 
   // ---------- Models ----------
   ipcMain.handle(Channels.Models.LIST, async () => modelsStore.list());
@@ -238,4 +249,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   );
 
   logger.info('IPC handlers registered');
+
+  // Register terminal IPC handlers (interactive SSH shell sessions)
+  registerTerminalHandlers(win);
+}
+
+// Clean up all terminal sessions on app exit
+export function cleanupTerminalSessions(): void {
+  closeAllTerminals();
 }

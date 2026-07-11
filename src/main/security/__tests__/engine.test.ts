@@ -139,6 +139,64 @@ describe('checkCommandSecurity', () => {
     const result = checkCommandSecurity('echo ok && rm -rf /', undefined, config);
     expect(result.allowed).toBe(false);
   });
+
+  describe('custom allowed rules', () => {
+    // Build a config with custom allowed rules that whitelist an unknown command
+    function makeConfigWithAllowed(): EffectiveSecurityConfig {
+      return {
+        mode: 'operator',
+        blocked: compileRules(DEFAULT_BLOCKED_RULES),
+        allowed: compileRules([
+          { pattern: 'my-readonly-script', reason: 'user-defined read-only', severity: 'low' },
+        ]),
+        hostOverrides: new Map(),
+      };
+    }
+
+    it('downgrades WRITE to READ when allowed rule matches', () => {
+      const cfg = makeConfigWithAllowed();
+      // my-readonly-script is unknown -> normally WRITE, but allowed rule downgrades
+      const result = checkCommandSecurity('my-readonly-script --verbose', undefined, cfg);
+      expect(result.allowed).toBe(true);
+      expect(result.commandType).toBe('READ');
+    });
+
+    it('does NOT downgrade SUDO to READ when allowed rule matches', () => {
+      const cfg = makeConfigWithAllowed();
+      const result = checkCommandSecurity('sudo my-readonly-script', undefined, cfg);
+      expect(result.allowed).toBe(true);
+      expect(result.commandType).toBe('SUDO');
+    });
+
+    it('still blocks commands that match blocked rules even if allowed', () => {
+      const cfg = makeConfigWithAllowed();
+      // rm -rf / matches both blocked and (hypothetically) allowed, but blocked wins
+      const result = checkCommandSecurity('rm -rf /', undefined, cfg);
+      expect(result.allowed).toBe(false);
+      expect(result.commandType).toBe('BLOCKED');
+    });
+
+    it('host-level allowed rules override global', () => {
+      const cfg: EffectiveSecurityConfig = {
+        mode: 'operator',
+        blocked: compileRules(DEFAULT_BLOCKED_RULES),
+        allowed: [],
+        hostOverrides: new Map([
+          [
+            'host-1',
+            {
+              allowed: compileRules([
+                { pattern: 'custom-check', reason: 'host allowed', severity: 'low' },
+              ]),
+            },
+          ],
+        ]),
+      };
+      const result = checkCommandSecurity('custom-check --status', 'host-1', cfg);
+      expect(result.allowed).toBe(true);
+      expect(result.commandType).toBe('READ');
+    });
+  });
 });
 
 describe('sanitizeCommand', () => {

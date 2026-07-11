@@ -89,6 +89,24 @@ export interface AgentErrorEvent {
   message: string;
 }
 
+export interface SftpDirEntry {
+  name: string;
+  longname: string;
+  isDirectory: boolean;
+  size: number;
+  modifyTime: number;
+}
+
+export interface SftpProgressEvent {
+  direction: 'upload' | 'download';
+  hostId: string;
+  remotePath: string;
+  localPath?: string;
+  transferred: number;
+  total: number;
+  transferId?: string;
+}
+
 export interface OpsAgentApi {
   ping: () => Promise<string>;
 
@@ -108,6 +126,13 @@ export interface OpsAgentApi {
         circuitReason?: string;
       }>
     >;
+    batchCreate: (payloads: HostInput[]) => Promise<{
+      created: HostConfig[];
+      errors: Array<{ row: number; name: string; error: string }>;
+    }>;
+    renameGroup: (oldName: string, newName: string) => Promise<number>;
+    deleteGroup: (groupName: string) => Promise<number>;
+    listGroups: () => Promise<string[]>;
   };
 
   models: {
@@ -160,6 +185,42 @@ export interface OpsAgentApi {
     onAuthorizationRequest: (handler: (event: AgentAuthorizationRequest) => void) => () => void;
     onComplete: (handler: (event: AgentCompleteEvent) => void) => () => void;
     onError: (handler: (event: AgentErrorEvent) => void) => () => void;
+  };
+
+  terminal: {
+    start: (hostId: string) => Promise<{ sessionId: string; hostName: string }>;
+    startLocal: () => Promise<{ sessionId: string; hostName: string }>;
+    input: (sessionId: string, data: string) => Promise<void>;
+    resize: (sessionId: string, cols: number, rows: number) => Promise<void>;
+    kill: (sessionId: string) => Promise<void>;
+    onData: (handler: (sessionId: string, data: string) => void) => () => void;
+    onExit: (
+      handler: (sessionId: string, info: { hostName: string; reason: string }) => void,
+    ) => () => void;
+  };
+
+  sftp: {
+    list: (hostId: string, remotePath: string) => Promise<SftpDirEntry[]>;
+    upload: (
+      hostId: string,
+      localPath: string,
+      remotePath: string,
+      transferId: string,
+    ) => Promise<{ bytesTransferred: number; remotePath: string; localPath: string }>;
+    download: (
+      hostId: string,
+      remotePath: string,
+      localPath: string,
+      transferId: string,
+    ) => Promise<{ bytesTransferred: number; remotePath: string; localPath: string }>;
+    realpath: (hostId: string) => Promise<string>;
+    cancel: (transferId: string) => Promise<boolean>;
+    onProgress: (handler: (event: SftpProgressEvent) => void) => () => void;
+  };
+
+  dialog: {
+    saveFile: (defaultName: string, title?: string) => Promise<string | null>;
+    openFile: () => Promise<string | null>;
   };
 }
 

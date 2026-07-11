@@ -1,6 +1,6 @@
 import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
-import { registerIpcHandlers } from '../src/main/ipc/handlers.js';
+import { registerIpcHandlers, cleanupTerminalSessions } from '../src/main/ipc/handlers.js';
 import { initDatabase } from '../src/main/storage/database.js';
 import { logger } from '../src/main/utils/logger.js';
 
@@ -57,6 +57,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  cleanupTerminalSessions();
   if (process.platform !== 'darwin') {
     app.quit();
   }

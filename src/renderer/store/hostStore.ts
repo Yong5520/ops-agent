@@ -10,6 +10,12 @@ interface HostStore {
   update: (id: string, input: Partial<HostInput>) => Promise<void>;
   remove: (id: string) => Promise<void>;
   getByName: (name: string) => HostConfig | undefined;
+  batchCreate: (payloads: HostInput[]) => Promise<{
+    created: HostConfig[];
+    errors: Array<{ row: number; name: string; error: string }>;
+  }>;
+  renameGroup: (oldName: string, newName: string) => Promise<void>;
+  deleteGroup: (groupName: string) => Promise<void>;
 }
 
 export const useHostStore = create<HostStore>((set, get) => ({
@@ -48,4 +54,22 @@ export const useHostStore = create<HostStore>((set, get) => ({
   },
 
   getByName: (name) => get().hosts.find((h) => h.name === name),
+
+  batchCreate: async (payloads) => {
+    const result = await window.opsAgent.hosts.batchCreate(payloads);
+    if (result.created.length > 0) {
+      set({ hosts: [...get().hosts, ...result.created] });
+    }
+    return result;
+  },
+
+  renameGroup: async (oldName, newName) => {
+    await window.opsAgent.hosts.renameGroup(oldName, newName);
+    await get().load();
+  },
+
+  deleteGroup: async (groupName) => {
+    await window.opsAgent.hosts.deleteGroup(groupName);
+    await get().load();
+  },
 }));

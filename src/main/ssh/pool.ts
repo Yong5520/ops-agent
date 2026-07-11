@@ -185,6 +185,15 @@ export class ConnectionPool extends EventEmitter {
     return this.pool.get(hostId);
   }
 
+  // Mark a host as active (reset idle timer). Called during long-running
+  // operations like SFTP transfers to prevent the idle checker from closing
+  // the connection mid-transfer.
+  markActive(hostId: string): void {
+    if (this.pool.has(hostId)) {
+      this.lastActivity.set(hostId, Date.now());
+    }
+  }
+
   // Snapshot of all known hosts' connection + circuit state for UI rendering.
   listStatus(): HostStatus[] {
     return hostsStore.list().map((host) => {

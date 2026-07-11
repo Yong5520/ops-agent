@@ -82,8 +82,8 @@ export function SafetyModeSection({ currentMode, onModeChange }: SafetyModeSecti
           </Button>
         </div>
         <p className="text-xs text-zinc-500">
-          自定义规则会与 17 条默认拦截规则合并生效。blocked 类型拦截匹配命令，allowed
-          类型放行匹配命令。
+          自定义规则会与默认拦截规则合并生效。blocked 类型拦截匹配命令，allowed 类型将匹配的 WRITE
+          命令降级为 READ（免审批），SUDO 命令不受影响。
         </p>
 
         {rules.length === 0 && !showForm && (

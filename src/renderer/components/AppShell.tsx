@@ -8,6 +8,7 @@ interface AppShellProps {
 const NAV_ITEMS = [
   { to: '/dashboard', label: '仪表盘', icon: 'dashboard' },
   { to: '/chat', label: '对话', icon: 'chat' },
+  { to: '/terminal', label: '终端', icon: 'terminal' },
   { to: '/settings', label: '设置', icon: 'settings' },
   { to: '/audit', label: '审计', icon: 'audit' },
 ];
@@ -68,6 +69,19 @@ function NavIcon({ name }: { name: string }) {
           <polyline points="14 2 14 8 20 8" />
           <line x1="8" y1="13" x2="16" y2="13" />
           <line x1="8" y1="17" x2="16" y2="17" />
+        </svg>
+      );
+    case 'terminal':
+      return (
+        <svg
+          className={common}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <polyline points="4 17 10 11 4 5" />
+          <line x1="12" y1="19" x2="20" y2="19" />
         </svg>
       );
     default:

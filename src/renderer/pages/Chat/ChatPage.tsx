@@ -28,7 +28,9 @@ export function ChatPage() {
     // Ensure we have a session
     let session = currentSession;
     if (!session) {
-      session = await createSession({ hostIds, safetyMode });
+      // Read latest hostIds from the store to capture any hosts added via @mention
+      const latestHostIds = useSessionStore.getState().hostIds;
+      session = await createSession({ hostIds: latestHostIds, safetyMode });
     }
 
     // Add user message to UI immediately
@@ -40,11 +42,12 @@ export function ChatPage() {
       createdAt: new Date().toISOString(),
     });
 
-    // Start the agent loop
+    // Start the agent loop with the latest hostIds
+    const latestHostIds = useSessionStore.getState().hostIds;
     await startRun({
       sessionId: session.id,
       userMessage: text,
-      hostIds,
+      hostIds: latestHostIds,
       safetyMode,
     });
   };
@@ -59,6 +62,13 @@ export function ChatPage() {
     },
     [truncateMessagesAfter],
   );
+
+  const handleMentionHost = useCallback((hostId: string) => {
+    const { hostIds: current } = useSessionStore.getState();
+    if (!current.includes(hostId)) {
+      useSessionStore.getState().setHostIds([...current, hostId]);
+    }
+  }, []);
 
   const handleExport = async () => {
     if (!currentSession) return;
@@ -78,7 +88,7 @@ export function ChatPage() {
     }
   };
 
-  // No session selected — show empty state with quick actions
+  // No session selected - show empty state with input
   if (!currentSession && !isRunning) {
     return (
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -88,7 +98,7 @@ export function ChatPage() {
             <div>
               <h1 className="text-lg font-semibold">对话</h1>
               <p className="text-xs text-zinc-500">
-                {activeProvider ? `模型: ${activeProvider.name}` : '未配置活跃模型'}
+                {activeProvider ? `模型: ${activeProvider.name}` : '未配置模型'}
                 {' · '}
                 {hosts.length > 0 ? `${hosts.length} 台主机` : '未配置主机'}
               </p>
@@ -110,7 +120,7 @@ export function ChatPage() {
                   href="#/settings"
                   className="mt-2 inline-block text-sm text-blue-400 hover:underline"
                 >
-                  前往设置 →
+                  前往设置 -&gt;
                 </a>
               </div>
             ) : hosts.length === 0 ? (
@@ -120,16 +130,24 @@ export function ChatPage() {
                   href="#/settings"
                   className="mt-2 inline-block text-sm text-blue-400 hover:underline"
                 >
-                  前往设置 →
+                  前往设置 -&gt;
                 </a>
               </div>
             ) : (
               <div className="text-center">
                 <div className="text-4xl mb-3">🤖</div>
-                <p className="text-sm text-zinc-400">点击左侧"新建会话"开始对话</p>
+                <p className="text-sm text-zinc-400">输入运维需求开始，或点击左侧"新建会话"</p>
               </div>
             )}
           </div>
+
+          {/* Input - always available so user can type and @mention hosts even without a session */}
+          <MessageInput
+            isRunning={isRunning}
+            onSend={handleSend}
+            onCancel={() => {}}
+            onMentionHost={handleMentionHost}
+          />
         </div>
       </div>
     );
@@ -181,6 +199,7 @@ export function ChatPage() {
           onCancel={() => currentSession && cancelRun(currentSession.id)}
           editFromMessage={editFromMessage}
           onClearEdit={() => setEditFromMessage(null)}
+          onMentionHost={handleMentionHost}
         />
       </div>
 

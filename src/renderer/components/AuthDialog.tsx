@@ -51,10 +51,10 @@ export function AuthDialog() {
     await Promise.allSettled(all.map((a) => respondAuth(a.toolCallId, false, '批量拒绝')));
   }, [pendingAuths, respondAuth]);
 
-  // Batch: approve all (with confirmation for SUDO)
+  // Batch: approve all non-SUDO (SUDO skipped by default)
   const approveAll = useCallback(async () => {
     const hasSudo = pendingAuths.some((a) => a.commandType === 'SUDO');
-    // SUDO commands always need individual confirmation — skip them in batch
+    // SUDO commands always need individual confirmation - skip them in batch
     const targets = hasSudo
       ? pendingAuths.filter((a) => a.commandType !== 'SUDO')
       : [...pendingAuths];
@@ -63,7 +63,17 @@ export function AuthDialog() {
     );
   }, [pendingAuths, respondAuth]);
 
-  // Backup checkbox state — only shown when backupPaths is present
+  // Batch: approve ALL including SUDO (requires explicit confirmation)
+  const [showSudoConfirm, setShowSudoConfirm] = useState(false);
+
+  const approveAllIncludingSudo = useCallback(async () => {
+    await Promise.allSettled(
+      pendingAuths.map((a) => respondAuth(a.toolCallId, true, undefined, !!a.backupPaths)),
+    );
+    setShowSudoConfirm(false);
+  }, [pendingAuths, respondAuth]);
+
+  // Backup checkbox state - only shown when backupPaths is present
   const [backupChecked, setBackupChecked] = useState(true);
 
   // Reset backup checkbox when switching to a new auth item
@@ -109,29 +119,55 @@ export function AuthDialog() {
           setCurrentIndex((i) => Math.max(i - 1, 0));
           break;
         case 'escape':
-          rejectAll();
+          if (showSudoConfirm) {
+            setShowSudoConfirm(false);
+          } else {
+            rejectAll();
+          }
           break;
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [auth, approve, reject, approveAll, approveAllOnHost, rejectAll, pendingAuths.length]);
+  }, [auth, approve, reject, approveAll, approveAllOnHost, rejectAll, pendingAuths.length, showSudoConfirm]);
 
   if (!auth) return null;
 
   const readCount = pendingAuths.filter((a) => a.commandType === 'READ').length;
+  const writeCount = pendingAuths.filter((a) => a.commandType === 'WRITE').length;
+  const sudoCount = pendingAuths.filter((a) => a.commandType === 'SUDO').length;
+  const hasSudo = sudoCount > 0;
+
+  const sudoAuths = pendingAuths.filter((a) => a.commandType === 'SUDO');
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
-        {/* Queue Header */}
+        {/* Queue Header with summary counts */}
         <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-3">
           <span className="text-lg">⚠</span>
           <h3 className="text-sm font-semibold text-amber-400">授权队列</h3>
           <span className="text-xs text-zinc-500">
             {currentIndex + 1} / {pendingAuths.length} 个待处理
-            {readCount > 0 && ` · ${readCount} 个 READ`}
           </span>
+          {/* Summary badges */}
+          <div className="flex items-center gap-1.5">
+            {readCount > 0 && (
+              <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                {readCount} READ
+              </span>
+            )}
+            {writeCount > 0 && (
+              <span className="rounded bg-amber-900 px-1.5 py-0.5 font-mono text-[10px] text-amber-300">
+                {writeCount} WRITE
+              </span>
+            )}
+            {sudoCount > 0 && (
+              <span className="rounded bg-red-900 px-1.5 py-0.5 font-mono text-[10px] text-red-300">
+                {sudoCount} SUDO
+              </span>
+            )}
+          </div>
           <div className="ml-auto flex gap-1.5">
             {readCount > 0 && (
               <Button variant="ghost" onClick={approveAllRead} className="text-xs">
@@ -218,7 +254,7 @@ export function AuthDialog() {
             </div>
           )}
 
-          {/* Backup option — only shown when the tool provided backupPaths */}
+          {/* Backup option - only shown when the tool provided backupPaths */}
           {auth.backupPaths && auth.backupPaths.length > 0 && (
             <label className="mt-2 flex cursor-pointer items-center gap-2 rounded border border-blue-900/50 bg-blue-950/20 px-3 py-2">
               <input
@@ -245,9 +281,13 @@ export function AuthDialog() {
             >
               批准 @{auth.hostName}
             </Button>
-            {pendingAuths.length > 1 && (
-              <Button variant="ghost" onClick={approveAll} className="text-xs">
-                批准全部{pendingAuths.some((a) => a.commandType === 'SUDO') ? ' (跳过 SUDO)' : ''}
+            {hasSudo && (
+              <Button
+                variant="ghost"
+                onClick={() => setShowSudoConfirm(true)}
+                className="text-xs text-amber-400"
+              >
+                批准全部(含 SUDO)
               </Button>
             )}
           </div>
@@ -256,6 +296,12 @@ export function AuthDialog() {
               拒绝
               <kbd className="ml-1 text-[10px] text-red-300/60">N</kbd>
             </Button>
+            {pendingAuths.length > 1 && (
+              <Button variant="secondary" onClick={approveAll}>
+                批准全部{hasSudo ? ' (跳过 SUDO)' : ''}
+                <kbd className="ml-1 text-[10px] text-zinc-400/60">Shift+A</kbd>
+              </Button>
+            )}
             <Button variant="primary" onClick={approve}>
               批准
               <kbd className="ml-1 text-[10px] text-blue-300/60">Y</kbd>
@@ -267,11 +313,51 @@ export function AuthDialog() {
         <div className="border-t border-zinc-800/50 bg-zinc-950/30 px-5 py-1.5 text-[10px] text-zinc-600">
           快捷键：<kbd className="text-zinc-500">y</kbd> 批准 ·{' '}
           <kbd className="text-zinc-500">n</kbd> 拒绝 · <kbd className="text-zinc-500">a</kbd>{' '}
-          同主机 · <kbd className="text-zinc-500">Shift+A</kbd> 全批准 ·{' '}
+          同主机 · <kbd className="text-zinc-500">Shift+A</kbd> 批准全部 ·{' '}
           <kbd className="text-zinc-500">j/k</kbd> 导航 · <kbd className="text-zinc-500">Esc</kbd>{' '}
           全拒
         </div>
       </div>
+
+      {/* SUDO confirmation modal - shown when user clicks "批准全部(含 SUDO)" */}
+      {showSudoConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-lg border border-red-800 bg-zinc-900 shadow-xl">
+            <div className="border-b border-red-900/50 px-5 py-3">
+              <h3 className="text-sm font-semibold text-red-400">⚠ 确认批准所有 SUDO 命令</h3>
+            </div>
+            <div className="max-h-60 overflow-y-auto px-5 py-3">
+              <p className="mb-2 text-xs text-zinc-400">
+                以下 {sudoCount} 条 SUDO 命令将以 root 权限执行，请逐一确认：
+              </p>
+              <div className="space-y-1.5">
+                {sudoAuths.map((a, i) => (
+                  <div
+                    key={a.toolCallId}
+                    className="rounded border border-red-900/40 bg-red-950/20 px-3 py-1.5"
+                  >
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-zinc-600">{i + 1}.</span>
+                      <span className="text-zinc-500">@{a.hostName}</span>
+                    </div>
+                    <code className="mt-1 block text-xs text-zinc-200 font-mono break-all">
+                      {a.command}
+                    </code>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-zinc-800 px-5 py-3">
+              <Button variant="ghost" onClick={() => setShowSudoConfirm(false)}>
+                取消
+              </Button>
+              <Button variant="danger" onClick={approveAllIncludingSudo}>
+                确认全部批准
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
