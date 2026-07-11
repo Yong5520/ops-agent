@@ -13,7 +13,12 @@ import { logger } from '../utils/logger.js';
 export class OpsAgentError extends Error {
   constructor(
     message: string,
-    public readonly code: 'SSH_ERROR' | 'SSH_TIMEOUT' | 'SSH_AUTH' | 'SSH_NOT_CONNECTED' | 'INVALID_PARAMS' = 'SSH_ERROR',
+    public readonly code:
+      | 'SSH_ERROR'
+      | 'SSH_TIMEOUT'
+      | 'SSH_AUTH'
+      | 'SSH_NOT_CONNECTED'
+      | 'INVALID_PARAMS' = 'SSH_ERROR',
   ) {
     super(message);
     this.name = 'OpsAgentError';
@@ -26,7 +31,12 @@ export class SSHConnectionManager extends EventEmitter {
   private isConnecting = false;
   private connectionPromise: Promise<void> | null = null;
   // Persistent su shell stream (when suPassword is configured)
-  private suShell: { write: (data: string) => void; end: () => void; on: (e: string, cb: (d: Buffer) => void) => void; removeAllListeners: (e?: string) => void } | null = null;
+  private suShell: {
+    write: (data: string) => void;
+    end: () => void;
+    on: (e: string, cb: (d: Buffer) => void) => void;
+    removeAllListeners: (e?: string) => void;
+  } | null = null;
   private suPromise: Promise<void> | null = null;
   private isElevated = false;
   private state: ConnectionState = 'disconnected';
@@ -92,7 +102,9 @@ export class SSHConnectionManager extends EventEmitter {
           try {
             await this.ensureElevated();
           } catch (err) {
-            logger.warn(`[${this.hostName}] su elevation failed (non-fatal): ${(err as Error).message}`);
+            logger.warn(
+              `[${this.hostName}] su elevation failed (non-fatal): ${(err as Error).message}`,
+            );
           }
         }
         resolve();
@@ -127,6 +139,7 @@ export class SSHConnectionManager extends EventEmitter {
         username: this.config.username,
         readyTimeout: 30_000,
         keepaliveInterval: 30_000,
+        keepaliveCountMax: 3,
       };
       if (this.config.password) connectConfig.password = this.config.password;
       if (this.config.privateKey) connectConfig.privateKey = this.config.privateKey;

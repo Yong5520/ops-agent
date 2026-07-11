@@ -169,9 +169,9 @@ export const BUILTIN_SKILLS: Skill[] = [
 
 1. **整体使用**：\`df -h\` 查看各挂载点使用率。
 2. **大目录**：\`du -sh /* 2>/dev/null | sort -rh | head -10\`，逐层深入。
-3. **大文件**：\`find / -type f -size +500M 2>/dev/null | head -20\`。
+3. **大文件**：\`find / -maxdepth 4 -size +500M 2>/dev/null | head -20\`。
 4. **inode**：\`df -i\` 查看 inode 使用率（小文件过多导致 inode 满）。
-5. **日志文件**：\`find /var/log -type f -name "*.log" -exec du -sh {} \\; | sort -rh | head -10\`。
+5. **日志文件**：\`find /var/log -name "*.log" -exec du -sh {} \\; | sort -rh | head -10\`。
 6. **已删除未释放**：\`lsof | grep deleted | head -10\`（进程持有已删除文件）。
 
 清理建议（需用户确认）：

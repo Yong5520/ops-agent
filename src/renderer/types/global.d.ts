@@ -188,6 +188,9 @@ interface OpsAgentApi {
     onExit: (
       handler: (sessionId: string, info: { hostName: string; reason: string }) => void,
     ) => () => void;
+    onReconnect: (
+      handler: (sessionId: string, info: { hostName: string; attempt: number }) => void,
+    ) => () => void;
   };
   sftp: {
     list: (hostId: string, remotePath: string) => Promise<SftpDirEntry[]>;
@@ -210,6 +213,16 @@ interface OpsAgentApi {
   dialog: {
     saveFile: (defaultName: string, title?: string) => Promise<string | null>;
     openFile: () => Promise<string | null>;
+  };
+  ai: {
+    generateCommand: (
+      naturalLanguage: string,
+      hostId?: string,
+    ) => Promise<{
+      command: string;
+      explanation: string;
+      safetyLevel: 'read' | 'write' | 'sudo';
+    }>;
   };
 }
 

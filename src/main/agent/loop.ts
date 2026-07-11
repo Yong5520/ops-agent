@@ -1,5 +1,5 @@
 import { streamText } from 'ai';
-import { getActiveModel } from './providers.js';
+import { getActiveModel, validateModelExists } from './providers.js';
 import { createTools } from './tools.js';
 import { buildSystemPrompt } from './system-prompt.js';
 import {
@@ -10,6 +10,7 @@ import {
   saveAssistantMessage,
 } from './context.js';
 import { hostsStore } from '../storage/hosts.js';
+import { modelsStore } from '../storage/models.js';
 import { gatherMultipleHostFacts } from './facts.js';
 import { logger } from '../utils/logger.js';
 import type { AgentLoopParams, SessionContext } from './types.js';
@@ -63,6 +64,16 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     });
 
     // ── 3. Get active model (needed before context compression) ───────────
+    // Pre-flight: validate that the model name exists on the endpoint.
+    // Some proxies (New API) reset the TCP connection (ECONNRESET) instead
+    // of returning a clean HTTP error when the model name is invalid.
+    const activeProvider = modelsStore.getActive();
+    if (activeProvider) {
+      logger.info(
+        `[Agent] Pre-flight check: model="${activeProvider.modelName}" type=${activeProvider.type} endpoint=${activeProvider.endpoint}`,
+      );
+      await validateModelExists(activeProvider);
+    }
     const model = getActiveModel();
 
     // ── 4. Load + compress message history ─────────────────────────────────
@@ -265,8 +276,13 @@ function formatModelError(err: Error): string {
   if (msg.includes('500') || msg.includes('502') || msg.includes('503')) {
     return '模型服务端错误。请稍后重试。';
   }
-  if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
-    return '无法连接模型 API 端点。请检查网络和端点配置。';
+  if (
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('fetch failed') ||
+    msg.includes('Cannot connect to API')
+  ) {
+    return '无法连接模型 API 端点。这通常是由于端点 URL 不正确（需以 /v1 结尾）、模型名称不存在、或网络不通导致。请在设置页检查模型配置并点击"测试连接"。';
   }
   if (msg.includes('No active model provider')) {
     return '未配置活跃模型供应商。请先在设置页配置模型。';

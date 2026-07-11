@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { SSHConnectionManager, OpsAgentError } from './connection.js';
 import { CircuitBreaker, type CircuitState } from './circuit-breaker.js';
 import { hostsStore } from '../storage/hosts.js';
+import { hasActiveTerminal } from './active-terminals.js';
 import { logger } from '../utils/logger.js';
 import type { HostConfig } from '../../shared/types.js';
 import type { SshClientConfig, ConnectionEvent } from './types.js';
@@ -231,6 +232,12 @@ export class ConnectionPool extends EventEmitter {
     this.idleCheckInterval = setInterval(() => {
       const now = Date.now();
       for (const [hostId, lastTime] of this.lastActivity.entries()) {
+        // Skip hosts with active interactive terminals - the shell stream
+        // itself keeps the connection "in use" regardless of command input.
+        if (hasActiveTerminal(hostId)) {
+          this.lastActivity.set(hostId, now);
+          continue;
+        }
         if (now - lastTime > this.idleTimeoutMs) {
           const mgr = this.pool.get(hostId);
           if (mgr) {

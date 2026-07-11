@@ -13,6 +13,7 @@ interface TerminalViewProps {
   hostId: string;
   isActive: boolean;
   onOpenFileTransfer: () => void;
+  onToggleAiBar: () => void;
 }
 
 interface ContextMenuState {
@@ -189,6 +190,7 @@ export function TerminalView({
   hostName,
   isActive,
   onOpenFileTransfer,
+  onToggleAiBar,
 }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -286,10 +288,26 @@ export function TerminalView({
     });
 
     // Listen for stream exit
-    const removeExitListener = window.opsAgent.terminal.onExit((sid) => {
+    const removeExitListener = window.opsAgent.terminal.onExit((sid, info) => {
       if (sid === sessionId) {
-        term.write('\r\n\x1b[31m[连接已断开]\x1b[0m\r\n');
-        updateTabStatus(sessionId, 'disconnected');
+        if (info.reason === 'reconnecting') {
+          term.write('\r\n\x1b[33m[正在重连...]\x1b[0m\r\n');
+          updateTabStatus(sessionId, 'reconnecting');
+        } else if (info.reason === 'reconnect-failed') {
+          term.write('\r\n\x1b[31m[重连失败: 网络不可达]\x1b[0m\r\n');
+          updateTabStatus(sessionId, 'disconnected');
+        } else {
+          term.write('\r\n\x1b[31m[连接已断开]\x1b[0m\r\n');
+          updateTabStatus(sessionId, 'disconnected');
+        }
+      }
+    });
+
+    // Listen for successful reconnect
+    const removeReconnectListener = window.opsAgent.terminal.onReconnect((sid) => {
+      if (sid === sessionId) {
+        term.write('\r\n\x1b[32m[重连成功]\x1b[0m\r\n');
+        updateTabStatus(sessionId, 'connected');
       }
     });
 
@@ -306,12 +324,17 @@ export function TerminalView({
     });
     resizeObserver.observe(containerRef.current);
 
-    // Ctrl+F to search, Ctrl+Shift+C/V for copy/paste
+    // Ctrl+F to search, Ctrl+Shift+C/V for copy/paste, Ctrl+I to toggle AI bar
     // (attachCustomKeyEventHandler returns void - handler is disposed with terminal)
     term.attachCustomKeyEventHandler((e) => {
       if (e.ctrlKey && e.key === 'f') {
         e.preventDefault();
         setShowSearch(true);
+        return false;
+      }
+      if (e.ctrlKey && e.key === 'i') {
+        e.preventDefault();
+        onToggleAiBar();
         return false;
       }
       if (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
@@ -348,6 +371,7 @@ export function TerminalView({
       resizeDisposable.dispose();
       removeDataListener();
       removeExitListener();
+      removeReconnectListener();
       resizeObserver.disconnect();
       term.dispose();
       termRef.current = null;

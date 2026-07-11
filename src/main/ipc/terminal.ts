@@ -1,6 +1,13 @@
 import { ipcMain, dialog, type BrowserWindow } from 'electron';
 import * as pty from 'node-pty';
 import { connectionPool } from '../ssh/index.js';
+import { markTerminalActive, unmarkTerminalActive } from '../ssh/active-terminals.js';
+import {
+  getReconnectDelay,
+  MAX_RECONNECT_ATTEMPTS,
+  shouldAttemptReconnect,
+} from '../ssh/reconnect.js';
+import { generateCommand } from '../agent/ai-command.js';
 import { logger } from '../utils/logger.js';
 import { uploadFile, downloadFile, listDir, getSftp } from '../ssh/sftp.js';
 import type { DirEntry } from '../ssh/sftp.js';
@@ -23,6 +30,9 @@ interface TerminalSession {
   } | null;
   pty?: pty.IPty | null;
   closed: boolean;
+  reconnecting: boolean;
+  lastCols: number;
+  lastRows: number;
 }
 
 // Active terminal sessions keyed by sessionId
@@ -40,6 +50,7 @@ const CHANNELS = {
   KILL: 'terminal:kill',
   DATA: 'terminal:data',
   EXIT: 'terminal:exit',
+  RECONNECT: 'terminal:reconnect',
   // SFTP channels
   SFTP_LIST: 'sftp:list',
   SFTP_UPLOAD: 'sftp:upload',
@@ -50,7 +61,141 @@ const CHANNELS = {
   // Native dialog channels
   DIALOG_SAVE: 'dialog:saveFile',
   DIALOG_OPEN: 'dialog:openFile',
+  // AI command generation
+  AI_GENERATE_COMMAND: 'ai:generateCommand',
 } as const;
+
+// Attempt to reconnect an SSH terminal session after an unexpected stream close.
+// Tries up to MAX_RECONNECT_ATTEMPTS times with backoff (1s, 3s, 10s).
+// On success: replaces the session's stream and sends terminal:reconnect event.
+// On failure: sends terminal:exit with reason='reconnect-failed'.
+async function attemptReconnect(session: TerminalSession): Promise<void> {
+  if (session.reconnecting) return;
+  session.reconnecting = true;
+
+  // Notify renderer that we're attempting to reconnect
+  if (mainWindow) {
+    mainWindow.webContents.send(CHANNELS.EXIT, session.sessionId, {
+      hostName: session.hostName,
+      reason: 'reconnecting',
+    });
+  }
+
+  for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
+    if (!shouldAttemptReconnect(session.closed, attempt)) {
+      break;
+    }
+
+    const delay = getReconnectDelay(attempt);
+    logger.info(
+      `[Terminal] Reconnect attempt ${attempt + 1}/${MAX_RECONNECT_ATTEMPTS} for ${session.hostName} in ${delay}ms`,
+    );
+
+    await new Promise((r) => setTimeout(r, delay));
+
+    // User may have closed the tab while we were waiting
+    if (session.closed) {
+      session.reconnecting = false;
+      return;
+    }
+
+    try {
+      const mgr = await connectionPool.get(session.hostId);
+      const conn = mgr.getConnection();
+
+      const reconnected = await new Promise<boolean>((resolve) => {
+        conn.shell(
+          { term: 'xterm-256color', cols: session.lastCols, rows: session.lastRows },
+          (err, stream) => {
+            if (err) {
+              logger.warn(
+                `[Terminal] Reconnect shell failed on ${session.hostName}: ${err.message}`,
+              );
+              resolve(false);
+              return;
+            }
+
+            session.stream = {
+              write: (data: string) => stream.write(data),
+              end: () => stream.end(),
+              destroy: () => {
+                stream.removeAllListeners();
+                stream.end();
+                try {
+                  (stream as unknown as { destroy?: () => void }).destroy?.();
+                } catch {
+                  // ignore
+                }
+              },
+              on: (event: string, cb: (data: Buffer) => void) => stream.on(event, cb),
+              removeAllListeners: (event?: string) => stream.removeAllListeners(event),
+              setWindow: (rows: number, cols: number, height: number, width: number) =>
+                stream.setWindow(rows, cols, height, width),
+            };
+            session.reconnecting = false;
+
+            stream.on('data', (data: Buffer) => {
+              if (mainWindow && !session.closed) {
+                mainWindow.webContents.send(CHANNELS.DATA, session.sessionId, data.toString());
+              }
+            });
+
+            stream.on('close', () => {
+              if (session.closed) {
+                session.stream = null;
+                sessions.delete(session.sessionId);
+                unmarkTerminalActive(session.hostId);
+                if (mainWindow) {
+                  mainWindow.webContents.send(CHANNELS.EXIT, session.sessionId, {
+                    hostName: session.hostName,
+                    reason: 'Stream closed',
+                  });
+                }
+                logger.info(
+                  `[Terminal] Session ${session.sessionId} on ${session.hostName} closed by user`,
+                );
+                return;
+              }
+              session.stream = null;
+              attemptReconnect(session);
+            });
+
+            resolve(true);
+          },
+        );
+      });
+
+      if (reconnected) {
+        logger.info(
+          `[Terminal] Reconnected session ${session.sessionId} on ${session.hostName} (attempt ${attempt + 1})`,
+        );
+        if (mainWindow) {
+          mainWindow.webContents.send(CHANNELS.RECONNECT, session.sessionId, {
+            hostName: session.hostName,
+            attempt: attempt + 1,
+          });
+        }
+        return;
+      }
+    } catch (err) {
+      logger.warn(
+        `[Terminal] Reconnect attempt ${attempt + 1} failed for ${session.hostName}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // All attempts exhausted
+  session.reconnecting = false;
+  sessions.delete(session.sessionId);
+  unmarkTerminalActive(session.hostId);
+  if (mainWindow) {
+    mainWindow.webContents.send(CHANNELS.EXIT, session.sessionId, {
+      hostName: session.hostName,
+      reason: 'reconnect-failed',
+    });
+  }
+  logger.error(`[Terminal] All reconnect attempts failed for ${session.hostName}`);
+}
 
 export function registerTerminalHandlers(win: BrowserWindow): void {
   mainWindow = win;
@@ -95,8 +240,12 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
               stream.setWindow(rows, cols, height, width),
           },
           closed: false,
+          reconnecting: false,
+          lastCols: 80,
+          lastRows: 24,
         };
         sessions.set(sessionId, session);
+        markTerminalActive(hostId);
 
         stream.on('data', (data: Buffer) => {
           if (mainWindow && !session.closed) {
@@ -105,16 +254,23 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
         });
 
         stream.on('close', () => {
-          session.closed = true;
-          session.stream = null;
-          sessions.delete(sessionId);
-          if (mainWindow) {
-            mainWindow.webContents.send(CHANNELS.EXIT, sessionId, {
-              hostName,
-              reason: 'Stream closed',
-            });
+          // User-initiated close (via terminal:kill) -> clean exit, no reconnect
+          if (session.closed) {
+            session.stream = null;
+            sessions.delete(sessionId);
+            unmarkTerminalActive(hostId);
+            if (mainWindow) {
+              mainWindow.webContents.send(CHANNELS.EXIT, sessionId, {
+                hostName,
+                reason: 'Stream closed',
+              });
+            }
+            logger.info(`[Terminal] Session ${sessionId} on ${hostName} closed by user`);
+            return;
           }
-          logger.info(`[Terminal] Session ${sessionId} on ${hostName} closed`);
+          // Unexpected close -> attempt auto-reconnect
+          session.stream = null;
+          attemptReconnect(session);
         });
 
         logger.info(`[Terminal] SSH session ${sessionId} started on ${hostName}`);
@@ -163,6 +319,9 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
       },
       pty: ptyProcess,
       closed: false,
+      reconnecting: false,
+      lastCols: 80,
+      lastRows: 24,
     };
     sessions.set(sessionId, session);
 
@@ -208,6 +367,10 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
   ipcMain.handle(CHANNELS.RESIZE, async (_e, sessionId: string, cols: number, rows: number) => {
     const session = sessions.get(sessionId);
     if (session?.closed) return;
+    if (session) {
+      session.lastCols = cols;
+      session.lastRows = rows;
+    }
     // SSH shell uses setWindow
     if (session?.stream?.setWindow) {
       session.stream.setWindow(rows, cols, rows * 16, cols * 8);
@@ -226,7 +389,7 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
   ipcMain.handle(CHANNELS.KILL, async (_e, sessionId: string) => {
     const session = sessions.get(sessionId);
     if (session) {
-      session.closed = true;
+      session.closed = true; // Mark as user-initiated close so stream 'close' won't reconnect
       // For local pty: kill the pty process
       if (session.pty) {
         try {
@@ -244,6 +407,9 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
       session.stream = null;
       session.pty = null;
       sessions.delete(sessionId);
+      if (session.type === 'ssh') {
+        unmarkTerminalActive(session.hostId);
+      }
       logger.info(`[Terminal] Session ${sessionId} killed by user`);
     }
   });
@@ -375,6 +541,16 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+
+  // ── AI command generation ────────────────────────────────────────────────
+
+  ipcMain.handle(
+    CHANNELS.AI_GENERATE_COMMAND,
+    async (_e, naturalLanguage: string, hostId?: string) => {
+      const result = await generateCommand({ naturalLanguage, hostId });
+      return result;
+    },
+  );
 }
 
 // Clean up all terminal sessions on app exit

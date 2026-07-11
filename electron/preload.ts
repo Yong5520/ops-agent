@@ -133,6 +133,15 @@ const api: OpsAgentApi = {
       ipcRenderer.on('terminal:exit', listener);
       return () => ipcRenderer.removeListener('terminal:exit', listener);
     },
+    onReconnect: (handler) => {
+      const listener = (
+        _e: unknown,
+        sessionId: string,
+        info: { hostName: string; attempt: number },
+      ) => handler(sessionId, info);
+      ipcRenderer.on('terminal:reconnect', listener);
+      return () => ipcRenderer.removeListener('terminal:reconnect', listener);
+    },
   },
 
   // SFTP (file transfer)
@@ -158,6 +167,12 @@ const api: OpsAgentApi = {
     saveFile: (defaultName: string, title?: string) =>
       ipcRenderer.invoke('dialog:saveFile', defaultName, title),
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
+  },
+
+  // AI command generation
+  ai: {
+    generateCommand: (naturalLanguage: string, hostId?: string) =>
+      ipcRenderer.invoke('ai:generateCommand', naturalLanguage, hostId),
   },
 };
 

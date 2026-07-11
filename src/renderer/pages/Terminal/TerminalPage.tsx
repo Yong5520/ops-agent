@@ -5,6 +5,7 @@ import { Button } from '../../components/Button.js';
 import { TerminalView } from './TerminalView.js';
 import { FileTransferPanel } from './FileTransferPanel.js';
 import { SnippetsBar } from './SnippetsBar.js';
+import { AiCommandBar } from './AiCommandBar.js';
 import { cn } from '../../lib/cn.js';
 import type { HostConfig } from '../../../shared/types.js';
 
@@ -44,6 +45,7 @@ export function TerminalPage() {
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [showFilePanel, setShowFilePanel] = useState(false);
   const [showSnippets, setShowSnippets] = useState(false);
+  const [showAiBar, setShowAiBar] = useState(false);
   const [tabContextMenu, setTabContextMenu] = useState<{
     x: number;
     y: number;
@@ -264,9 +266,11 @@ export function TerminalPage() {
                           ? 'bg-emerald-400'
                           : tab.status === 'connecting'
                             ? 'bg-amber-400 animate-pulse'
-                            : tab.status === 'error'
-                              ? 'bg-red-500'
-                              : 'bg-zinc-600',
+                            : tab.status === 'reconnecting'
+                              ? 'bg-amber-500 animate-pulse'
+                              : tab.status === 'error'
+                                ? 'bg-red-500'
+                                : 'bg-zinc-600',
                       )}
                     />
                     <span className="max-w-[120px] truncate">{tab.hostName}</span>
@@ -341,62 +345,106 @@ export function TerminalPage() {
                 >
                   📁
                 </button>
+                <button
+                  onClick={() => setShowAiBar((v) => !v)}
+                  disabled={!activeTab}
+                  className={cn(
+                    'rounded px-2 py-1 text-xs transition-colors disabled:opacity-30',
+                    showAiBar
+                      ? 'bg-indigo-900/30 text-indigo-400'
+                      : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800',
+                  )}
+                  title="AI 命令助手 (Ctrl+I)"
+                >
+                  ✨
+                </button>
               </div>
             </div>
 
             {/* Terminal + side panels layout */}
             <div className="flex flex-1 min-h-0 overflow-hidden">
-              {/* Terminal area - render ALL tabs, toggle visibility via CSS */}
-              <div className="flex flex-1 min-h-0 overflow-hidden">
-                {tabs.map((tab) => (
-                  <div
-                    key={tab.sessionId}
-                    className={cn(
-                      'flex-1 min-h-0 overflow-hidden',
-                      tab.sessionId === activeTabId ? 'flex' : 'hidden',
-                    )}
-                  >
-                    {tab.status === 'error' ? (
-                      <div className="flex h-full flex-col items-center justify-center">
-                        <p className="text-sm text-red-400">连接失败: {tab.error}</p>
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          className="mt-3"
-                          onClick={() => {
-                            const host = hosts.find((h) => h.id === tab.hostId);
-                            if (host) handleReconnect(host);
-                          }}
-                        >
-                          重连
-                        </Button>
-                      </div>
-                    ) : tab.status === 'disconnected' ? (
-                      <div className="flex h-full flex-col items-center justify-center">
-                        <p className="text-sm text-zinc-500">连接已断开</p>
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          className="mt-3"
-                          onClick={() => {
-                            const host = hosts.find((h) => h.id === tab.hostId);
-                            if (host) handleReconnect(host);
-                          }}
-                        >
-                          重连
-                        </Button>
-                      </div>
-                    ) : (
-                      <TerminalView
-                        sessionId={tab.sessionId}
-                        hostName={tab.hostName}
-                        hostId={tab.hostId}
-                        isActive={tab.sessionId === activeTabId}
-                        onOpenFileTransfer={() => setShowFilePanel(true)}
-                      />
-                    )}
-                  </div>
-                ))}
+              {/* Terminal + AI bar column */}
+              <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
+                {/* Terminal area - render ALL tabs, toggle visibility via CSS */}
+                <div className="flex flex-1 min-h-0 overflow-hidden">
+                  {tabs.map((tab) => (
+                    <div
+                      key={tab.sessionId}
+                      className={cn(
+                        'flex-1 min-h-0 overflow-hidden',
+                        tab.sessionId === activeTabId ? 'flex' : 'hidden',
+                      )}
+                    >
+                      {tab.status === 'error' ? (
+                        <div className="flex h-full flex-col items-center justify-center">
+                          <p className="text-sm text-red-400">连接失败: {tab.error}</p>
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            className="mt-3"
+                            onClick={() => {
+                              const host = hosts.find((h) => h.id === tab.hostId);
+                              if (host) handleReconnect(host);
+                            }}
+                          >
+                            重连
+                          </Button>
+                        </div>
+                      ) : tab.status === 'disconnected' ? (
+                        <div className="flex h-full flex-col items-center justify-center">
+                          <p className="text-sm text-zinc-500">连接已断开</p>
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            className="mt-3"
+                            onClick={() => {
+                              const host = hosts.find((h) => h.id === tab.hostId);
+                              if (host) handleReconnect(host);
+                            }}
+                          >
+                            重连
+                          </Button>
+                        </div>
+                      ) : tab.status === 'reconnecting' ? (
+                        <div className="flex h-full flex-col items-center justify-center">
+                          <div className="mb-3 h-6 w-6 animate-spin rounded-full border-2 border-zinc-700 border-t-amber-400" />
+                          <p className="text-sm text-amber-400">正在重连...</p>
+                          <p className="mt-1 text-xs text-zinc-600">网络中断后自动尝试恢复连接</p>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="mt-3"
+                            onClick={() => closeTab(tab.sessionId)}
+                          >
+                            取消
+                          </Button>
+                        </div>
+                      ) : (
+                        <TerminalView
+                          sessionId={tab.sessionId}
+                          hostName={tab.hostName}
+                          hostId={tab.hostId}
+                          isActive={tab.sessionId === activeTabId}
+                          onOpenFileTransfer={() => setShowFilePanel(true)}
+                          onToggleAiBar={() => setShowAiBar((v) => !v)}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {/* AI command bar (bottom) */}
+                {showAiBar && activeTab && (
+                  <AiCommandBar
+                    sessionId={activeTab.sessionId}
+                    hostId={activeTab.hostId}
+                    onExecute={(cmd) => {
+                      window.opsAgent.terminal.input(activeTab.sessionId, cmd + '\n').catch(() => {
+                        // ignore - session may be closed
+                      });
+                    }}
+                    onClose={() => setShowAiBar(false)}
+                  />
+                )}
               </div>
 
               {/* Right side: Snippets bar */}
@@ -426,9 +474,11 @@ export function TerminalPage() {
                     className={
                       activeTab.status === 'connected'
                         ? 'text-emerald-400'
-                        : activeTab.status === 'error'
-                          ? 'text-red-400'
-                          : 'text-zinc-500'
+                        : activeTab.status === 'reconnecting'
+                          ? 'text-amber-400'
+                          : activeTab.status === 'error'
+                            ? 'text-red-400'
+                            : 'text-zinc-500'
                     }
                   >
                     {activeTab.hostName} · {activeTab.status}
@@ -440,6 +490,7 @@ export function TerminalPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <span className="text-zinc-700">✨ Ctrl+I AI 命令</span>
                   <Button
                     variant="ghost"
                     size="sm"

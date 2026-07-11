@@ -5,7 +5,7 @@ export interface TerminalTab {
   sessionId: string;
   hostId: string;
   hostName: string;
-  status: 'connecting' | 'connected' | 'disconnected' | 'error';
+  status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error';
   type: 'ssh' | 'local';
   error?: string;
 }
