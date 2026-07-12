@@ -14,6 +14,7 @@ import type {
   CustomRule,
   CustomRuleInput,
   SafetyMode,
+  TodoItem,
 } from '../../shared/types.js';
 
 // Strongly-typed surface exposed to the renderer via contextBridge.
@@ -87,6 +88,28 @@ export interface AgentCompleteEvent {
 export interface AgentErrorEvent {
   sessionId: string;
   message: string;
+}
+
+export interface AgentTodosUpdateEvent {
+  sessionId: string;
+  todos: TodoItem[];
+}
+
+export interface AgentPlanApprovalRequestEvent {
+  sessionId: string;
+  plan: string;
+}
+
+export interface AgentPlanApprovalResponse {
+  sessionId: string;
+  approved: boolean;
+  editedPlan?: string;
+  reason?: string;
+}
+
+export interface AgentModeChangeEvent {
+  sessionId: string;
+  mode: SafetyMode;
 }
 
 export interface SftpDirEntry {
@@ -178,6 +201,7 @@ export interface OpsAgentApi {
     run: (request: AgentRunRequest) => Promise<void>;
     cancel: (sessionId: string) => Promise<void>;
     respondAuthorization: (response: AgentAuthorizationResponse) => Promise<void>;
+    respondPlanApproval: (response: AgentPlanApprovalResponse) => Promise<void>;
     // Event listeners (renderer subscribes to main→renderer events)
     onTextStream: (handler: (event: AgentTextStreamEvent) => void) => () => void;
     onToolCall: (handler: (event: AgentToolCallEvent) => void) => () => void;
@@ -185,6 +209,14 @@ export interface OpsAgentApi {
     onAuthorizationRequest: (handler: (event: AgentAuthorizationRequest) => void) => () => void;
     onComplete: (handler: (event: AgentCompleteEvent) => void) => () => void;
     onError: (handler: (event: AgentErrorEvent) => void) => () => void;
+    onTodosUpdate: (handler: (event: AgentTodosUpdateEvent) => void) => () => void;
+    onPlanApprovalRequest: (handler: (event: AgentPlanApprovalRequestEvent) => void) => () => void;
+    onModeChange: (handler: (event: AgentModeChangeEvent) => void) => () => void;
+  };
+
+  tasks: {
+    list: (sessionId: string) => Promise<TodoItem[]>;
+    update: (sessionId: string, todos: TodoItem[]) => Promise<{ success: boolean }>;
   };
 
   terminal: {
@@ -235,6 +267,10 @@ export interface OpsAgentApi {
       explanation: string;
       safetyLevel: 'read' | 'write' | 'sudo';
     }>;
+  };
+
+  window: {
+    restoreFocus: () => Promise<void>;
   };
 }
 

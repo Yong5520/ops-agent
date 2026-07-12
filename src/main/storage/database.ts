@@ -42,7 +42,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 2;
+  const targetVersion = 3;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -59,6 +59,51 @@ function runMigrations(database: DB): void {
     database.exec(
       `UPDATE sessions SET host_ids = '["' || host_id || '"]' WHERE host_id IS NOT NULL`,
     );
+  }
+
+  if (currentVersion < 3) {
+    logger.info(`Running migration v3: add task_lists table + sessions columns + plan mode`);
+    // task_lists table (P0-1 TodoWrite)
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS task_lists (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        todos       TEXT NOT NULL,
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_lists_session ON task_lists(session_id);
+    `);
+    // plan_mode column (P0-1 Plan Mode): 0=off, 1=on
+    database.exec(`ALTER TABLE sessions ADD COLUMN plan_mode INTEGER DEFAULT 0`);
+    // summary columns (P0-2 Summary persistence)
+    database.exec(`ALTER TABLE sessions ADD COLUMN summary TEXT`);
+    database.exec(`ALTER TABLE sessions ADD COLUMN summary_coverage_index INTEGER DEFAULT 0`);
+
+    // Recreate sessions table with updated CHECK constraint to include 'plan'
+    // SQLite doesn't support ALTER TABLE to modify constraints, so we use the
+    // create-copy-drop-rename pattern with foreign keys temporarily disabled.
+    database.pragma('foreign_keys = OFF');
+    database.exec(`
+      CREATE TABLE sessions_new (
+        id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        title       TEXT,
+        host_id     TEXT REFERENCES hosts(id) ON DELETE SET NULL,
+        host_ids    TEXT,
+        safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot', 'plan')),
+        status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+        plan_mode   INTEGER DEFAULT 0,
+        summary     TEXT,
+        summary_coverage_index INTEGER DEFAULT 0,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO sessions_new (id, title, host_id, host_ids, safety_mode, status, plan_mode, summary, summary_coverage_index, created_at, updated_at)
+      SELECT id, title, host_id, host_ids, safety_mode, status, plan_mode, summary, summary_coverage_index, created_at, updated_at FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, updated_at);
+    `);
+    database.pragma('foreign_keys = ON');
   }
 
   setUserVersion(database, targetVersion);

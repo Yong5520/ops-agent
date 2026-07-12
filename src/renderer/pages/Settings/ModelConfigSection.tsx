@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useModelStore } from '../../store/modelStore.js';
+import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { Input, Field, Select } from '../../components/Form.js';
 import type {
@@ -87,8 +88,13 @@ export function ModelConfigSection() {
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => {
-                  if (confirm(`确定删除模型 "${p.name}"？`)) remove(p.id);
+                onClick={async () => {
+                  const ok = await useUiStore.getState().confirm({
+                    message: `确定删除模型 "${p.name}"？`,
+                    confirmLabel: '删除',
+                    variant: 'danger',
+                  });
+                  if (ok) remove(p.id);
                 }}
               >
                 删除

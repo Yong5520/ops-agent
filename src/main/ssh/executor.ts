@@ -101,7 +101,12 @@ export async function sudoExecCommand(
   }
 
   const sudoPassword = manager.sudoPassword;
-  const escapedCmd = escapeCommandForShell(command);
+  // Defense-in-depth: strip leading 'sudo ' prefix from the command if the
+  // model already included it. This tool wraps commands in `sudo -S sh -c`,
+  // so a double `sudo` causes password authentication to fail.
+  // Example: "sudo apt update" -> "apt update"
+  const cleanedCommand = command.replace(/^\s*sudo\s+/, '');
+  const escapedCmd = escapeCommandForShell(cleanedCommand);
   let wrapped: string;
   if (!sudoPassword) {
     // Passwordless sudo

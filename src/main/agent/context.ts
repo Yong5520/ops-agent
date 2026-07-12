@@ -1,8 +1,11 @@
 import type { CoreMessage } from 'ai';
 import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
+import { getDb } from '../storage/database.js';
 import { sessionsStore } from '../storage/sessions.js';
 import { logger } from '../utils/logger.js';
+import { microcompactToolResults } from './compaction/microcompact.js';
+import { snipCompactIfNeeded } from './compaction/snip.js';
 
 // Context manager — handles message history loading, format conversion,
 // and summary compression for the agent loop.
@@ -40,6 +43,45 @@ interface ContextSummary {
   summarizedUpTo: number; // index in the message array
   generatedAt: number;
 }
+
+// ── DB-backed summary persistence (P0-2.3) ──────────────────────────────────
+// Summary is persisted in the sessions table (summary, summary_coverage_index
+// columns) so it survives app restarts and session switching.
+
+function saveSummaryToDb(sessionId: string, summary: string, coverageIndex: number): void {
+  try {
+    const db = getDb();
+    db.prepare('UPDATE sessions SET summary = ?, summary_coverage_index = ? WHERE id = ?').run(
+      summary,
+      coverageIndex,
+      sessionId,
+    );
+  } catch (err) {
+    logger.error('[Context] Failed to save summary to DB:', err);
+  }
+}
+
+function loadSummaryFromDb(sessionId: string): ContextSummary | null {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare('SELECT summary, summary_coverage_index FROM sessions WHERE id = ?')
+      .get(sessionId) as
+      { summary: string | null; summary_coverage_index: number | null } | undefined;
+    if (row?.summary) {
+      return {
+        summaryText: row.summary,
+        summarizedUpTo: row.summary_coverage_index ?? 0,
+        generatedAt: Date.now(),
+      };
+    }
+  } catch {
+    // DB might not have the columns yet (migration not run)
+  }
+  return null;
+}
+
+// In-memory cache for the current session's summary (loaded from DB on first use)
 const summaryCache = new Map<string, ContextSummary>();
 
 // ── Model context window lookup ──────────────────────────────────────────
@@ -69,14 +111,28 @@ export function getModelContextWindow(modelName: string): number {
 // ── Message loading ───────────────────────────────────────────────────────
 
 // Load session messages and convert to AI SDK CoreMessage[].
+// Prepends DB-persisted summary if available (P0-2.3).
 export function loadMessages(sessionId: string): CoreMessage[] {
   const messages = sessionsStore.listMessages(sessionId);
-  return messages
+  const filtered = messages
     .filter((m) => m.role !== 'system') // system prompt is built separately
     .map((m) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
+
+  // Prepend persisted summary if available
+  const summary = loadSummaryFromDb(sessionId);
+  if (summary && summary.summaryText) {
+    // Load summary into in-memory cache for compressContext to use
+    summaryCache.set(sessionId, summary);
+    const summaryMsg: CoreMessage = {
+      role: 'system',
+      content: `[Context Summary] Previous conversation summary:\n\n${summary.summaryText}`,
+    };
+    return [summaryMsg, ...filtered];
+  }
+  return filtered;
 }
 
 // Save a user message and assistant response to the DB.
@@ -179,12 +235,13 @@ export async function compressContext(
     }
   }
 
-  // Update the cache
+  // Update the cache and persist to DB (P0-2.3)
   summaryCache.set(sessionId, {
     summaryText,
     summarizedUpTo: recentStart,
     generatedAt: Date.now(),
   });
+  saveSummaryToDb(sessionId, summaryText, recentStart);
 
   const summaryMessage: CoreMessage = {
     role: 'system',
@@ -240,14 +297,53 @@ ${conversationText}`;
 }
 
 // Build the full message array for the AI SDK call, including the new user message.
+// Applies microcompact + snip compaction to keep context manageable (P0-2).
 export function buildMessagesForCall(
   history: CoreMessage[],
   newUserMessage: string,
 ): CoreMessage[] {
-  return [...history, { role: 'user' as const, content: newUserMessage }];
+  let messages = [...history, { role: 'user' as const, content: newUserMessage }];
+
+  // 1. Microcompact: truncate large tool results (cheapest, runs first)
+  const micro = microcompactToolResults(messages);
+  if (micro.compactedCount > 0) {
+    logger.info(
+      `[Context] Microcompact: ${micro.compactedCount} tool results truncated, ~${micro.tokensSaved} tokens saved`,
+    );
+    messages = micro.messages;
+  }
+
+  return messages;
+}
+
+// Compact messages in the loop (between streamText calls).
+// Applies microcompact + snip if token threshold exceeded.
+export function compactMessages(messages: CoreMessage[], contextWindow: number): CoreMessage[] {
+  // 1. Microcompact: truncate large tool results
+  const micro = microcompactToolResults(messages);
+  let result = micro.messages;
+
+  if (micro.compactedCount > 0) {
+    logger.info(
+      `[Context] Microcompact: ${micro.compactedCount} tool results truncated, ~${micro.tokensSaved} tokens saved`,
+    );
+  }
+
+  // 2. Snip: remove old tool results if over 40% threshold
+  const snip = snipCompactIfNeeded(result, contextWindow);
+  if (snip.snipCount > 0) {
+    logger.info(
+      `[Context] Snip compact: ${snip.snipCount} old tool results snipped, ~${snip.tokensFreed} tokens freed`,
+    );
+    result = snip.messages;
+  }
+
+  return result;
 }
 
 // Clear the summary cache for a session (e.g., when session is deleted).
 export function clearSummaryCache(sessionId: string): void {
   summaryCache.delete(sessionId);
+  // Also clear from DB
+  saveSummaryToDb(sessionId, '', 0);
 }

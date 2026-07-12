@@ -67,11 +67,35 @@ export class SSHConnectionManager extends EventEmitter {
   }
 
   isConnected(): boolean {
-    return (
-      this.conn !== null &&
-      !!(this.conn as unknown as { _sock?: { destroyed?: boolean } })._sock &&
-      !(this.conn as unknown as { _sock?: { destroyed?: boolean } })._sock?.destroyed
-    );
+    if (this.conn === null) return false;
+    // Check TCP socket health
+    const sock = (this.conn as unknown as { _sock?: { destroyed?: boolean } })._sock;
+    if (!sock) return false;
+    if (sock.destroyed) return false;
+    // Check ssh2 Client internal state - if the client has emitted 'end'
+    // or 'close', the connection is dead even if the socket isn't marked
+    // as destroyed yet.
+    // The ssh2 library sets _sock.writable to false when the SSH layer
+    // is broken, even if the TCP socket is still technically open.
+    if ('writable' in sock && !sock.writable) return false;
+    return true;
+  }
+
+  // Force-close the connection and reset state. Used when exec failures
+  // indicate the SSH session layer is broken (e.g., channel exhaustion).
+  // The next pool.get() will create a fresh connection.
+  forceClose(): void {
+    if (this.conn) {
+      try {
+        this.conn.end();
+      } catch {
+        // ignore - connection may already be dead
+      }
+      this.conn = null;
+      this.isConnecting = false;
+      this.connectionPromise = null;
+      this.setState('disconnected');
+    }
   }
 
   async connect(): Promise<void> {

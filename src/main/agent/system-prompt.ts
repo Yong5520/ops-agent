@@ -2,6 +2,8 @@ import { hostsStore } from '../storage/hosts.js';
 import { MODE_DESCRIPTIONS } from '../security/modes.js';
 import { DEFAULT_BLOCKED_RULES } from '../security/rules.js';
 import { getEnabledSkills } from './skills/index.js';
+import { buildMemoryPromptSection } from './memory/claudemd.js';
+import { loadAutoMemory } from './memory/automem.js';
 import type { HostFacts } from './facts.js';
 import type { SafetyMode } from '../../shared/types.js';
 
@@ -136,6 +138,25 @@ ${ruleSummary}
 - 被拦截后应调整方案，不要重复尝试同类命令
 - 用户自定义规则可能额外拦截某些命令`);
 
+  // ── 5b. Memory (CLAUDE.md + MEMORY.md) ─────────────────────────────────
+  const memoryContent = buildMemoryPromptSection();
+  if (memoryContent) {
+    sections.push(`## 运维知识库（CLAUDE.md）
+
+以下是用户配置的运维规范和知识，请遵循其中的指导：
+
+${memoryContent}`);
+  }
+
+  const autoMemory = loadAutoMemory();
+  if (autoMemory) {
+    sections.push(`## 自动记忆（MEMORY.md）
+
+以下是跨会话持久化的记忆，包含历史诊断结论、主机特性和用户偏好：
+
+${autoMemory}`);
+  }
+
   // ── 6. Enabled Skills ───────────────────────────────────────────────────
   const enabledSkills = getEnabledSkills();
   if (enabledSkills.length > 0) {
@@ -168,6 +189,11 @@ ${skillFragments}`);
 11. **多主机操作**：用户指定多台主机时，按主机分组报告结果，注意差异
 12. **持续诊断**：诊断未完成时，应主动继续调用工具收集信息，而非停下来等待用户催促。只有当你已经基于工具输出得出结论或需要用户提供新信息时才结束本轮
 13. **结论优先**：如果本轮已执行过工具调用，结束前必须给出至少一段实质性的分析或结论，不能以"让我检查X"结尾就停止
+14. **任务管理**：复杂任务（3 步以上）必须先调用 todo_write 工具创建任务列表，再开始执行。开始执行任务前将状态标记为 in_progress，完成后立即标记为 completed。不要批量标记。任务列表变化时实时同步。每次只保持一个 in_progress 任务
+15. **记忆沉淀**：当发现主机特性（如非标准日志路径）、用户偏好、可复用的诊断结论时，使用 update_memory 工具记录到 MEMORY.md。不要记录敏感信息（密码、密钥）。这些记忆会跨会话持久保存
+16. **计划模式**：当处于 plan 模式时，仅允许执行 READ 命令进行诊断。完成诊断后，必须调用 exit_plan_mode 工具提交结构化计划（包含：问题分析、执行步骤、风险评估、验证方法）。用户审批后系统自动切换到 operator 模式，方可执行写操作。如果用户拒绝，根据反馈修订计划后重新提交
+17. **sudo_exec 不加 sudo 前缀**：使用 sudo_exec 工具时，**不要**在命令前加 \`sudo\` 前缀。该工具会自动通过 \`sudo -S sh -c\` 包装命令。例如：正确用法是 \`apt update\`，而不是 \`sudo apt update\`。加 sudo 前缀会导致双重 sudo 认证失败
+18. **包安装超时**：\`apt update\`、\`apt install\` 等命令可能需要较长时间（>60秒）。对于长时间运行的命令，使用 \`timeout\` 包装并设置合理超时，例如 \`timeout 120 apt install -y nginx\`。避免直接执行可能导致 SSH 超时的长命令
 
 ## 输出格式
 

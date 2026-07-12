@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { Session, Message, SafetyMode } from '../../shared/types.js';
+import type { Session, Message, SafetyMode, TodoItem } from '../../shared/types.js';
+import { useAgentStore } from './agentStore.js';
 
 interface SessionStore {
   sessions: Session[];
@@ -10,6 +11,8 @@ interface SessionStore {
   // Session-level settings editable from the chat header
   hostIds: string[];
   safetyMode: SafetyMode;
+  // TodoWrite task list (P0-1)
+  todos: TodoItem[];
 
   load: () => Promise<void>;
   createSession: (params?: {
@@ -25,6 +28,8 @@ interface SessionStore {
   truncateMessagesAfter: (messageId: string) => Promise<void>;
   addMessage: (msg: Message) => void;
   updateLastAssistant: (content: string) => void;
+  setTodos: (todos: TodoItem[]) => void;
+  loadTodos: (sessionId: string) => Promise<void>;
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
@@ -35,6 +40,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   error: null,
   hostIds: [],
   safetyMode: 'operator',
+  todos: [],
 
   load: async () => {
     set({ loading: true, error: null });
@@ -72,17 +78,29 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       messages,
       hostIds: session.hostIds ?? [],
       safetyMode: session.safetyMode,
+      todos: [],
     });
+    // Load saved task list for this session
+    get().loadTodos(id);
   },
 
   deleteSession: async (id) => {
     try {
+      const isCurrent = get().currentSession?.id === id;
+      // Reset the agent store before deleting so that any lingering isRunning
+      // flag (e.g. when the user deletes the current session mid-run) is
+      // cleared. Without this, the chat input stays disabled because
+      // MessageInput checks isRunning for the textarea's `disabled` prop, and
+      // the Cancel button is a no-op since currentSession is null.
+      if (isCurrent) {
+        useAgentStore.getState().reset();
+      }
       await window.opsAgent.sessions.remove(id);
       const remaining = get().sessions.filter((s) => s.id !== id);
       set({
         sessions: remaining,
-        currentSession: get().currentSession?.id === id ? null : get().currentSession,
-        messages: get().currentSession?.id === id ? [] : get().messages,
+        currentSession: isCurrent ? null : get().currentSession,
+        messages: isCurrent ? [] : get().messages,
       });
     } catch (err) {
       // Surface IPC failures instead of letting them become unhandled
@@ -138,6 +156,19 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     if (lastIdx >= 0 && msgs[lastIdx].role === 'assistant') {
       const updated = { ...msgs[lastIdx], content };
       set({ messages: [...msgs.slice(0, lastIdx), updated] });
+    }
+  },
+
+  setTodos: (todos) => {
+    set({ todos });
+  },
+
+  loadTodos: async (sessionId) => {
+    try {
+      const todos = await window.opsAgent.tasks.list(sessionId);
+      set({ todos });
+    } catch {
+      set({ todos: [] });
     }
   },
 }));

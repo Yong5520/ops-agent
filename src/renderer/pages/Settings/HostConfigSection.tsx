@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useHostStore } from '../../store/hostStore.js';
+import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { Input, Field, Select } from '../../components/Form.js';
 import type { HostConfig, HostInput, AuthType } from '../../../shared/types.js';
@@ -116,7 +117,12 @@ export function HostConfigSection() {
   };
 
   const handleDeleteGroup = async (groupName: string) => {
-    if (!confirm(`删除分组"${groupName}"？组内主机会移至 default 分组。`)) return;
+    const ok = await useUiStore.getState().confirm({
+      message: `删除分组"${groupName}"？组内主机会移至 default 分组。`,
+      confirmLabel: '删除',
+      variant: 'danger',
+    });
+    if (!ok) return;
     await window.opsAgent.hosts.deleteGroup(groupName);
     await load();
   };
@@ -284,7 +290,12 @@ export function HostConfigSection() {
                             size="sm"
                             variant="ghost"
                             onClick={async () => {
-                              if (confirm(`确定删除主机 "${h.name}"？`)) {
+                              const ok = await useUiStore.getState().confirm({
+                                message: `确定删除主机 "${h.name}"？`,
+                                confirmLabel: '删除',
+                                variant: 'danger',
+                              });
+                              if (ok) {
                                 await remove(h.id);
                               }
                             }}
@@ -535,7 +546,10 @@ function ImportModal({
   } | null>(null);
 
   const parse = () => {
-    const lines = text.trim().split('\n').filter((l) => l.trim());
+    const lines = text
+      .trim()
+      .split('\n')
+      .filter((l) => l.trim());
     const parsed: HostInput[] = [];
     const errs: string[] = [];
 
@@ -546,9 +560,7 @@ function ImportModal({
     // Check if first line is a header
     const hasHeader =
       headers &&
-      (headers.includes('name') ||
-        headers.includes('host') ||
-        headers.includes('username'));
+      (headers.includes('name') || headers.includes('host') || headers.includes('username'));
     const dataLines = hasHeader ? lines.slice(1) : lines;
     const defaultFields = ['name', 'host', 'port', 'username', 'authtype', 'groupname'];
 
@@ -637,11 +649,7 @@ web01,10.31.20.1,22,ubuntu,key,Web组`;
       <div className="mt-10 mb-10 w-full max-w-3xl rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
         <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
           <h3 className="text-sm font-semibold text-zinc-200">批量导入主机</h3>
-          <button
-            onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-300"
-            aria-label="关闭"
-          >
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300" aria-label="关闭">
             ✕
           </button>
         </div>
@@ -668,19 +676,17 @@ web01,10.31.20.1,22,ubuntu,key,Web组`;
               解析预览
             </Button>
             {preview.length > 0 && errors.length === 0 && !result && (
-              <span className="text-xs text-emerald-400">
-                {preview.length} 台主机待导入
-              </span>
+              <span className="text-xs text-emerald-400">{preview.length} 台主机待导入</span>
             )}
           </div>
 
           {errors.length > 0 && (
             <div className="rounded-md border border-red-800 bg-red-950/30 px-3 py-2">
-              <div className="text-xs font-medium text-red-300 mb-1">
-                {errors.length} 个错误:
-              </div>
+              <div className="text-xs font-medium text-red-300 mb-1">{errors.length} 个错误:</div>
               {errors.map((e, i) => (
-                <div key={i} className="text-xs text-red-400/80">{e}</div>
+                <div key={i} className="text-xs text-red-400/80">
+                  {e}
+                </div>
               ))}
             </div>
           )}

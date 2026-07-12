@@ -18,10 +18,10 @@
   ],
   "win": {
     "target": [
-      { "target": "dir", "arch": ["x64"] }
+      { "target": "nsis", "arch": ["x64"] }
     ],
     "signAndEditExecutable": false,
-    "artifactName": "OpsAgent-${version}-${arch}.${ext}"
+    "artifactName": "OpsAgent-${version}-${arch}-setup.${ext}"
   },
   "mac": {
     "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],

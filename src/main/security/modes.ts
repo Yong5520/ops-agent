@@ -41,6 +41,19 @@ export function decideByMode(mode: SafetyMode, commandType: CommandType): ModeDe
       // Fully autonomous
       return { allowed: true, needsApproval: false };
 
+    case 'plan':
+      // Plan mode: only READ allowed, WRITE/SUDO blocked.
+      // The agent should use ExitPlanMode to get approval before executing.
+      if (commandType === 'READ') {
+        return { allowed: true, needsApproval: false };
+      }
+      return {
+        allowed: false,
+        needsApproval: false,
+        reason:
+          'Plan \u6a21\u5f0f\u4e0b\u7981\u6b62\u5199\u64cd\u4f5c\uff0c\u8bf7\u4f7f\u7528 exit_plan_mode \u63d0\u4ea4\u8ba1\u5212',
+      };
+
     default: {
       // Exhaustive check — unknown mode is treated as strictest (sentinel)
       const exhaustive: never = mode;
@@ -65,5 +78,9 @@ export const MODE_DESCRIPTIONS: Record<SafetyMode, { name: string; description: 
   autopilot: {
     name: '自主模式 (Autopilot)',
     description: 'AI 可自行决定并执行全部命令，无需人工确认。仅适用于测试环境或完全信任的场景。',
+  },
+  plan: {
+    name: '计划模式 (Plan)',
+    description: '只读诊断。仅允许 READ 操作，完成诊断后需提交计划并经用户审批后方可执行写操作。',
   },
 };

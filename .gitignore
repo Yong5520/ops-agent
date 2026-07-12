@@ -43,6 +43,15 @@ master.key
 # Claude Code local settings (contains secrets / local-only paths)
 .claude/settings.local.json
 .claude/plan/
+claude-code/
+
+# GLM model switcher (contains API token, local-only)
+use-glm.ps1
+use-ark.ps1
+use-glm.sh
+install-auto-ark.ps1
+uninstall-auto-ark.ps1
+.claude/settings.local.json.ark-backup
 
 # Test artifacts
 artifacts/

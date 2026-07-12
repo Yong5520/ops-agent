@@ -54,15 +54,27 @@ export const Channels = {
   Agent: {
     RUN: 'agent:run',
     CANCEL: 'agent:cancel',
-    // Events: main → renderer (via webContents.send)
+    // Events: main -> renderer (via webContents.send)
     TEXT_STREAM: 'agent:text-stream',
     TOOL_CALL: 'agent:tool-call',
     TOOL_RESULT: 'agent:tool-result',
     AUTHORIZATION_REQUEST: 'agent:authorization-request',
     COMPLETE: 'agent:complete',
     ERROR: 'agent:error',
-    // Handler: renderer → main (via ipcMain.handle)
+    TODOS_UPDATE: 'agent:todos-update',
+    // Plan approval (P0-1.B)
+    PLAN_APPROVAL_REQUEST: 'agent:plan-approval-request',
+    MODE_CHANGE: 'agent:mode-change',
+    // Handler: renderer -> main (via ipcMain.handle)
     AUTHORIZATION_RESPONSE: 'agent:authorization-response',
+    PLAN_APPROVAL_RESPONSE: 'agent:plan-approval-response',
+  },
+  Tasks: {
+    LIST: 'tasks:list',
+    UPDATE: 'tasks:update',
+  },
+  Window: {
+    RESTORE_FOCUS: 'window:restoreFocus',
   },
 } as const;
 

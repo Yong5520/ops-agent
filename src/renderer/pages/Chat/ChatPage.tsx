@@ -3,21 +3,55 @@ import { SessionSidebar } from './SessionSidebar.js';
 import { MessageList } from './MessageList.js';
 import { MessageInput } from './MessageInput.js';
 import { AuthDialog } from '../../components/AuthDialog.js';
+import { TaskList } from '../../components/TaskList.js';
+import { PlanApprovalDialog } from '../../components/PlanApprovalDialog.js';
 import { useSessionStore } from '../../store/sessionStore.js';
 import { useAgentStore } from '../../store/agentStore.js';
 import { useModelStore } from '../../store/modelStore.js';
 import { useHostStore } from '../../store/hostStore.js';
+import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import type { Message } from '../../../shared/types.js';
 
+interface PendingPlanApproval {
+  sessionId: string;
+  plan: string;
+}
+
 export function ChatPage() {
-  const { currentSession, messages, hostIds, safetyMode, createSession, truncateMessagesAfter } =
-    useSessionStore();
+  const {
+    currentSession,
+    messages,
+    hostIds,
+    safetyMode,
+    todos,
+    createSession,
+    truncateMessagesAfter,
+  } = useSessionStore();
   const { isRunning, streamingText, toolCards, error, startRun, cancelRun, clearError } =
     useAgentStore();
   const { activeProvider, load: loadModels } = useModelStore();
   const { hosts, load: loadHosts } = useHostStore();
   const [editFromMessage, setEditFromMessage] = useState<Message | null>(null);
+  const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
+
+  // Subscribe to plan approval requests from the agent (P0-1.B)
+  useEffect(() => {
+    const unsubscribe = window.opsAgent.agent.onPlanApprovalRequest((event) => {
+      setPendingPlanApproval({ sessionId: event.sessionId, plan: event.plan });
+    });
+    return unsubscribe;
+  }, []);
+
+  // Subscribe to mode change events from the agent (P0-1.B fix: state desync)
+  // When ExitPlanMode switches mode from 'plan' to 'operator', update the
+  // renderer's sessionStore so the NEXT loop starts in the correct mode.
+  useEffect(() => {
+    const unsubscribe = window.opsAgent.agent.onModeChange((event) => {
+      useSessionStore.getState().setSafetyMode(event.mode);
+    });
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     loadModels();
@@ -84,7 +118,12 @@ export function ChatPage() {
       URL.revokeObjectURL(url);
     } catch (err) {
       useAgentStore.getState().clearError();
-      alert(`导出失败: ${(err as Error).message}`);
+      await useUiStore.getState().confirm({
+        title: '导出失败',
+        message: (err as Error).message,
+        confirmLabel: '确定',
+        cancelLabel: '关闭',
+      });
     }
   };
 
@@ -183,6 +222,17 @@ export function ChatPage() {
           )}
         </header>
 
+        {/* Task List (TodoWrite) */}
+        <TaskList
+          todos={todos}
+          onClear={() => {
+            if (currentSession) {
+              window.opsAgent.tasks.update(currentSession.id, []);
+            }
+            useSessionStore.getState().setTodos([]);
+          }}
+        />
+
         {/* Messages */}
         <MessageList
           messages={messages}
@@ -205,6 +255,30 @@ export function ChatPage() {
 
       {/* Authorization dialog (modal) */}
       <AuthDialog />
+
+      {/* Plan approval dialog (P0-1.B) */}
+      {pendingPlanApproval && (
+        <PlanApprovalDialog
+          plan={pendingPlanApproval.plan}
+          sessionId={pendingPlanApproval.sessionId}
+          onApprove={(editedPlan) => {
+            window.opsAgent.agent.respondPlanApproval({
+              sessionId: pendingPlanApproval.sessionId,
+              approved: true,
+              editedPlan,
+            });
+            setPendingPlanApproval(null);
+          }}
+          onReject={(reason) => {
+            window.opsAgent.agent.respondPlanApproval({
+              sessionId: pendingPlanApproval.sessionId,
+              approved: false,
+              reason,
+            });
+            setPendingPlanApproval(null);
+          }}
+        />
+      )}
     </div>
   );
 }

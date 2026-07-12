@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS hosts (
   sudo_password TEXT,
   su_password   TEXT,
   group_name    TEXT DEFAULT 'default',
-  timeout_ms    INTEGER NOT NULL DEFAULT 60000,
+  timeout_ms    INTEGER NOT NULL DEFAULT 120000,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   title       TEXT,
   host_id     TEXT REFERENCES hosts(id) ON DELETE SET NULL,
   host_ids    TEXT,
-  safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot')),
+  safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot', 'plan')),
   status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -116,4 +116,13 @@ CREATE TABLE IF NOT EXISTS custom_rules (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_custom_rules_host ON custom_rules(host_id);
+
+-- 4.9 任务列表 (TodoWrite)
+CREATE TABLE IF NOT EXISTS task_lists (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  todos       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_lists_session ON task_lists(session_id);
 `;

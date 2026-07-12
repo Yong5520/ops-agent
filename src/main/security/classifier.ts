@@ -117,6 +117,21 @@ const READ_COMMANDS = [
   'type',
   'history',
   'man',
+  // System info (read-only, commonly needed in ops)
+  'whoami',
+  'id',
+  'lsb_release',
+  'hostnamectl',
+  'systemd-analyze',
+  'getent',
+  'getfacl',
+  'getcap',
+  'alternatives',
+  'update-alternatives',
+  'dpkg',
+  'rpm',
+  'apt-cache',
+  'apt-config',
 ];
 
 // Commands that modify system state - require confirmation in Operator mode.

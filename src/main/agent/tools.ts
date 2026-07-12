@@ -6,7 +6,7 @@ import { auditStore } from '../storage/audit.js';
 import { getEffectiveConfig, checkCommandSecurity, sanitizeCommand } from '../security/index.js';
 import { decideByMode } from '../security/modes.js';
 import { logger } from '../utils/logger.js';
-import type { SafetyMode, HostConfig } from '../../shared/types.js';
+import type { SafetyMode, HostConfig, TodoItem } from '../../shared/types.js';
 import type {
   SessionContext,
   ToolCallInfo,
@@ -15,6 +15,14 @@ import type {
   AuthorizationResponse,
   ToolExecutionRecord,
 } from './types.js';
+import { createTodoWriteTool } from './tools/todo-write.js';
+import { createUpdateMemoryTool } from './tools/update-memory.js';
+import {
+  createExitPlanModeTool,
+  type ModeHolder,
+  type PlanApprovalResult,
+  type ModeChangeCallback,
+} from './tools/exit-plan-mode.js';
 
 // Tool factory — creates the tools object for a single agent loop invocation.
 // Tools close over the session context and streaming callbacks so they can:
@@ -31,11 +39,36 @@ export interface ToolFactoryDeps {
   onToolCall: (info: ToolCallInfo) => void;
   onToolResult: (result: ToolCallResult) => void;
   onAuthorizationRequired: (request: AuthorizationRequest) => Promise<AuthorizationResponse>;
+  onTodosUpdate?: (todos: TodoItem[]) => void;
+  onPlanApproval?: (plan: string) => Promise<PlanApprovalResult>;
+  onModeChange?: ModeChangeCallback;
+  modeHolder: ModeHolder;
 }
 
 export function createTools(deps: ToolFactoryDeps) {
-  const { context, safetyMode, onToolCall, onToolResult, onAuthorizationRequired } = deps;
+  const {
+    context,
+    safetyMode,
+    onToolCall,
+    onToolResult,
+    onAuthorizationRequired,
+    onTodosUpdate,
+    onPlanApproval,
+    onModeChange,
+    modeHolder,
+  } = deps;
   const securityConfig = getEffectiveConfig(safetyMode);
+
+  // TodoWrite tool (P0-1): task list management, closured over sessionId
+  const todoWriteTool = createTodoWriteTool(context.sessionId, onTodosUpdate);
+
+  // update_memory tool (P0-4): persistent agent memory
+  const updateMemoryTool = createUpdateMemoryTool();
+
+  // ExitPlanMode tool (P0-1.B): plan approval, only available in plan mode
+  const exitPlanModeTool = onPlanApproval
+    ? createExitPlanModeTool(context.sessionId, onPlanApproval, modeHolder, onModeChange)
+    : undefined;
 
   // ── Host resolution helper ──────────────────────────────────────────────
   // Resolve a host name (from AI tool call) to a HostConfig. Falls back to
@@ -110,8 +143,9 @@ export function createTools(deps: ToolFactoryDeps) {
 
     const commandType = secResult.commandType;
 
-    // 2. Mode decision
-    const decision = decideByMode(safetyMode, commandType);
+    // 2. Mode decision - reads from modeHolder so ExitPlanMode can switch
+    //    mode mid-loop (plan -> operator) without recreating tools.
+    const decision = decideByMode(modeHolder.mode, commandType);
     if (!decision.allowed) {
       onToolCall({
         toolCallId,
@@ -153,7 +187,7 @@ export function createTools(deps: ToolFactoryDeps) {
         command,
         description,
         commandType,
-        safetyMode,
+        safetyMode: modeHolder.mode,
         backupPaths,
       };
       const response = await onAuthorizationRequired(request);
@@ -200,7 +234,7 @@ export function createTools(deps: ToolFactoryDeps) {
         hostId: rec.hostId,
         hostName: rec.hostName,
         hostIp: rec.hostIp,
-        safetyMode,
+        safetyMode: modeHolder.mode,
         commandType: rec.commandType,
         command: rec.command,
         description: rec.description,
@@ -339,6 +373,13 @@ export function createTools(deps: ToolFactoryDeps) {
           };
         } catch (err) {
           const errMsg = formatSshError(err as Error, host.name);
+          // Invalidate the connection on exec failure - the SSH session
+          // layer may be broken (zombie connection) even though the TCP
+          // socket is alive. This forces a fresh connection on next call.
+          if (isConnectionError(err as Error)) {
+            logger.warn(`[Tool] Connection error on exec, invalidating: ${(err as Error).message}`);
+            connectionPool.invalidate(host.id);
+          }
           onToolResult({
             toolCallId,
             toolName: 'exec',
@@ -482,6 +523,13 @@ export function createTools(deps: ToolFactoryDeps) {
           };
         } catch (err) {
           const errMsg = formatSshError(err as Error, host.name);
+          // Invalidate the connection on exec failure (same as exec tool)
+          if (isConnectionError(err as Error)) {
+            logger.warn(
+              `[Tool] Connection error on sudo_exec, invalidating: ${(err as Error).message}`,
+            );
+            connectionPool.invalidate(host.id);
+          }
           onToolResult({
             toolCallId,
             toolName: 'sudo_exec',
@@ -816,6 +864,10 @@ export function createTools(deps: ToolFactoryDeps) {
         }
       },
     }),
+
+    todo_write: todoWriteTool,
+    update_memory: updateMemoryTool,
+    ...(exitPlanModeTool ? { exit_plan_mode: exitPlanModeTool } : {}),
   };
 }
 
@@ -868,6 +920,23 @@ function isTransientError(err: Error): boolean {
   if (msg.includes('EPIPE')) return true;
   if (msg.includes('Keepalive timeout')) return true;
   if (msg.includes('Socket closed')) return true;
+  if (isConnectionError(err)) return true;
+  return false;
+}
+
+// Check if an error indicates the SSH connection is broken and should be
+// invalidated. This covers zombie connections where the TCP socket is alive
+// but the SSH session layer is unusable.
+function isConnectionError(err: Error): boolean {
+  const msg = err.message;
+  if (msg.includes('channel') || msg.includes('Channel')) return true;
+  if (msg.includes('MaxSessions')) return true;
+  if (msg.includes('ECONNRESET')) return true;
+  if (msg.includes('EPIPE')) return true;
+  if (msg.includes('Socket closed')) return true;
+  if (msg.includes('Keepalive timeout')) return true;
+  if (msg.includes('SSH_TIMEOUT')) return true;
+  if (msg.includes('Connection lost')) return true;
   return false;
 }
 

@@ -1,6 +1,6 @@
 // Shared types between main and renderer processes.
 
-export type SafetyMode = 'sentinel' | 'operator' | 'autopilot';
+export type SafetyMode = 'sentinel' | 'operator' | 'autopilot' | 'plan';
 
 export type CommandType = 'READ' | 'WRITE' | 'SUDO' | 'BLOCKED';
 export type AuthorizationStatus = 'auto' | 'approved' | 'rejected' | 'blocked';
@@ -128,6 +128,17 @@ export interface CustomRule {
 }
 
 export type CustomRuleInput = Omit<CustomRule, 'id' | 'createdAt'>;
+
+// ---------- Todo / Task list ----------
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface TodoItem {
+  id: string;
+  subject: string;
+  description: string;
+  status: TodoStatus;
+  activeForm?: string;
+}
 
 // ---------- Settings ----------
 export type SettingKey =

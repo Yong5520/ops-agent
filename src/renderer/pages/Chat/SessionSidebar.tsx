@@ -1,12 +1,14 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { useSessionStore } from '../../store/sessionStore.js';
 import { useHostStore } from '../../store/hostStore.js';
+import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { cn } from '../../lib/cn.js';
 import type { SafetyMode } from '../../../shared/types.js';
 
 const SAFETY_MODES: Array<{ value: SafetyMode; label: string }> = [
   { value: 'sentinel', label: '诊断' },
+  { value: 'plan', label: '计划' },
   { value: 'operator', label: '标准' },
   { value: 'autopilot', label: '自主' },
 ];
@@ -113,7 +115,12 @@ export function SessionSidebar() {
             isActive={currentSession?.id === s.id}
             onSelect={() => selectSession(s.id)}
             onDelete={async () => {
-              if (confirm('删除此会话？')) {
+              const ok = await useUiStore.getState().confirm({
+                message: '删除此会话？',
+                confirmLabel: '删除',
+                variant: 'danger',
+              });
+              if (ok) {
                 // Await so IPC rejection is caught by the store's try/catch
                 // instead of becoming an unhandled promise rejection.
                 await deleteSession(s.id);

@@ -226,6 +226,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }),
     );
 
+    unsubscribers.push(
+      window.opsAgent.agent.onTodosUpdate((event) => {
+        if (event.sessionId !== params.sessionId) return;
+        useSessionStore.getState().setTodos(event.todos);
+      }),
+    );
+
     // Initiate the run
     try {
       await window.opsAgent.agent.run({
@@ -294,9 +301,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   reset: () => {
+    // Set isRunning: false FIRST, before unsubscribing IPC listeners.
+    // If any unsub() throws, isRunning is still correctly reset so the
+    // chat input's `disabled` prop flips back to false immediately.
+    set({ isRunning: false, streamingText: '', toolCards: [], pendingAuths: [], error: null });
     for (const unsub of unsubscribers) unsub();
     unsubscribers = [];
-    set({ isRunning: false, streamingText: '', toolCards: [], pendingAuths: [], error: null });
   },
 
   clearError: () => set({ error: null }),

@@ -7,12 +7,20 @@ import { sessionsStore } from '../storage/sessions.js';
 import { auditStore } from '../storage/audit.js';
 import { settingsStore } from '../storage/settings.js';
 import { customRulesStore } from '../storage/custom-rules.js';
+import { taskListsStore } from '../storage/task-lists.js';
 import { runAgentLoop } from '../agent/loop.js';
 import { exportSessionToMarkdown } from '../agent/export.js';
+import { clearSummaryCache } from '../agent/context.js';
 import { connectionPool } from '../ssh/index.js';
 import { registerTerminalHandlers, closeAllTerminals } from './terminal.js';
 import type { AuthorizationResponse } from '../agent/types.js';
-import type { AgentRunRequest, AgentAuthorizationResponse } from './preload-api.js';
+import type {
+  AgentRunRequest,
+  AgentAuthorizationResponse,
+  AgentPlanApprovalResponse,
+} from './preload-api.js';
+import type { TodoItem } from '../../shared/types.js';
+import type { PlanApprovalResult } from '../agent/tools/exit-plan-mode.js';
 
 // Register all IPC handlers between renderer and main.
 // Called once from electron/main.ts during app.whenReady().
@@ -22,6 +30,10 @@ import type { AgentRunRequest, AgentAuthorizationResponse } from './preload-api.
 // When the agent loop requests authorization, we store a resolver here.
 // When the renderer responds via 'agent:authorization-response', we resolve.
 const pendingAuthorizations = new Map<string, (response: AuthorizationResponse) => void>();
+
+// Pending plan approval requests keyed by sessionId (P0-1.B).
+// Only one plan approval can be pending per session at a time.
+const pendingPlanApprovals = new Map<string, (result: PlanApprovalResult) => void>();
 
 // Active agent loops keyed by sessionId. Each entry holds the AbortController
 // used to genuinely terminate the streaming loop when the user clicks Stop.
@@ -88,9 +100,18 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Sessions.UPDATE, async (_e, id: string, payload) =>
     sessionsStore.updateSession(id, payload),
   );
-  ipcMain.handle(Channels.Sessions.DELETE, async (_e, id: string) =>
-    sessionsStore.deleteSession(id),
-  );
+  ipcMain.handle(Channels.Sessions.DELETE, async (_e, id: string) => {
+    // Abort any active agent loop for this session so the backend stops
+    // cleanly instead of erroring on FK constraint failures when trying to
+    // save messages to a session that no longer exists.
+    activeLoops.get(id)?.abort();
+    activeLoops.delete(id);
+    // Clear the cached context summary so stale entries for the deleted
+    // session don't linger. (Resolves the MEDIUM known issue from code
+    // review: summaryCache was never cleared on session deletion.)
+    clearSummaryCache(id);
+    return sessionsStore.deleteSession(id);
+  });
   ipcMain.handle(Channels.Sessions.MESSAGES, async (_e, sessionId: string) =>
     sessionsStore.listMessages(sessionId),
   );
@@ -202,6 +223,41 @@ export function registerIpcHandlers(win: BrowserWindow): void {
           message: error.message,
         });
       },
+      onTodosUpdate: (todos) => {
+        win.webContents.send(Channels.Agent.TODOS_UPDATE, {
+          sessionId: request.sessionId,
+          todos,
+        });
+      },
+      onPlanApproval: (plan) => {
+        // Send plan to renderer for user approval, wait for response
+        win.webContents.send(Channels.Agent.PLAN_APPROVAL_REQUEST, {
+          sessionId: request.sessionId,
+          plan,
+        });
+        return new Promise<PlanApprovalResult>((resolve) => {
+          // Auto-reject after 10 minutes to prevent infinite hangs
+          const timeoutId = setTimeout(
+            () => {
+              if (pendingPlanApprovals.has(request.sessionId)) {
+                pendingPlanApprovals.delete(request.sessionId);
+                logger.warn(`[Agent] Plan approval timed out for session ${request.sessionId}`);
+                resolve({ approved: false, reason: 'Plan approval timed out (10 minutes)' });
+              }
+            },
+            10 * 60 * 1000,
+          );
+
+          pendingPlanApprovals.set(request.sessionId, (result) => {
+            clearTimeout(timeoutId);
+            resolve(result);
+          });
+        });
+      },
+      onModeChange: (sessionId, newMode) => {
+        // Notify renderer to update its safetyMode state (P0-1.B fix: state desync)
+        win.webContents.send(Channels.Agent.MODE_CHANGE, { sessionId, mode: newMode });
+      },
     })
       .catch((err) => {
         logger.error(`[Agent] Unhandled error in loop: ${err.message}`);
@@ -247,6 +303,46 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       }
     },
   );
+
+  // ---------- Plan Approval Response (P0-1.B) ----------
+  ipcMain.handle(
+    Channels.Agent.PLAN_APPROVAL_RESPONSE,
+    async (_e, response: AgentPlanApprovalResponse) => {
+      const resolver = pendingPlanApprovals.get(response.sessionId);
+      if (resolver) {
+        pendingPlanApprovals.delete(response.sessionId);
+        resolver({
+          approved: response.approved,
+          editedPlan: response.editedPlan,
+          reason: response.reason,
+        });
+      } else {
+        logger.warn(`[Agent] Plan approval response for unknown session: ${response.sessionId}`);
+      }
+    },
+  );
+
+  // ---------- Tasks (TodoWrite) ----------
+  ipcMain.handle(Channels.Tasks.LIST, async (_e, sessionId: string) => {
+    return taskListsStore.get(sessionId) ?? [];
+  });
+
+  ipcMain.handle(Channels.Tasks.UPDATE, async (_e, sessionId: string, todos: TodoItem[]) => {
+    taskListsStore.save(sessionId, todos);
+    return { success: true };
+  });
+
+  // ---------- Window ----------
+  // Restores OS-level keyboard focus to the BrowserWindow. Needed because
+  // some Electron renderer APIs (e.g. window.focus()) cannot bypass the
+  // Win32 foreground lock. The main process has the authority to call
+  // SetForegroundWindow via BrowserWindow.focus().
+  ipcMain.handle(Channels.Window.RESTORE_FOCUS, async () => {
+    if (mainWindow) {
+      mainWindow.focus();
+      mainWindow.webContents.focus();
+    }
+  });
 
   logger.info('IPC handlers registered');
 

@@ -168,10 +168,12 @@ export class ConnectionPool extends EventEmitter {
 
   // Force-close and reopen a specific host's connection (e.g., after config edit).
   // Also resets the circuit breaker so the user can retry immediately.
+  // Used by exec failure handler to invalidate zombie connections.
   invalidate(hostId: string): void {
     const mgr = this.pool.get(hostId);
     if (mgr) {
-      mgr.close();
+      logger.info(`[Pool] Invalidating connection for host ${mgr.hostName}`);
+      mgr.forceClose();
       this.pool.delete(hostId);
       this.configSnapshot.delete(hostId);
     }

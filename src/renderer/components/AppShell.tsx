@@ -1,5 +1,6 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { ConfirmDialog } from './ConfirmDialog.js';
 
 interface AppShellProps {
   children: ReactNode;
@@ -110,6 +111,7 @@ export function AppShell({ children }: AppShellProps) {
         ))}
       </aside>
       <main className="flex flex-1 min-h-0 flex-col overflow-hidden">{children}</main>
+      <ConfirmDialog />
     </div>
   );
 }

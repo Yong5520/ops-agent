@@ -72,6 +72,7 @@ const api: OpsAgentApi = {
     cancel: (sessionId: string) => ipcRenderer.invoke('agent:cancel', sessionId),
     respondAuthorization: (response) =>
       ipcRenderer.invoke('agent:authorization-response', response),
+    respondPlanApproval: (response) => ipcRenderer.invoke('agent:plan-approval-response', response),
     onTextStream: (handler) => {
       const listener = (_e: unknown, event: unknown) =>
         handler(event as Parameters<typeof handler>[0]);
@@ -108,6 +109,31 @@ const api: OpsAgentApi = {
       ipcRenderer.on('agent:error', listener);
       return () => ipcRenderer.removeListener('agent:error', listener);
     },
+    onTodosUpdate: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:todos-update', listener);
+      return () => ipcRenderer.removeListener('agent:todos-update', listener);
+    },
+    onPlanApprovalRequest: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:plan-approval-request', listener);
+      return () => ipcRenderer.removeListener('agent:plan-approval-request', listener);
+    },
+    onModeChange: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:mode-change', listener);
+      return () => ipcRenderer.removeListener('agent:mode-change', listener);
+    },
+  },
+
+  // Tasks (TodoWrite)
+  tasks: {
+    list: (sessionId: string) => ipcRenderer.invoke('tasks:list', sessionId),
+    update: (sessionId: string, todos: unknown[]) =>
+      ipcRenderer.invoke('tasks:update', sessionId, todos),
   },
 
   // Terminal (interactive SSH shell + local cmd)
@@ -173,6 +199,11 @@ const api: OpsAgentApi = {
   ai: {
     generateCommand: (naturalLanguage: string, hostId?: string) =>
       ipcRenderer.invoke('ai:generateCommand', naturalLanguage, hostId),
+  },
+
+  // Window management
+  window: {
+    restoreFocus: () => ipcRenderer.invoke('window:restoreFocus'),
   },
 };
 

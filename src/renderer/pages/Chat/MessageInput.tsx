@@ -38,6 +38,20 @@ export function MessageInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { hosts } = useHostStore();
 
+  // Focus the textarea when it becomes enabled. Covers:
+  // 1. Component mounts in enabled state (e.g., after session deletion
+  //    switches ChatPage from main view to empty-state view).
+  // 2. isRunning transitions from true to false (agent completes or reset()).
+  // Also calls the main-process restoreFocus IPC as a safety net to ensure
+  // the BrowserWindow has OS-level keyboard focus (needed for cases where
+  // focus may have been stolen by other windows or dialogs).
+  useEffect(() => {
+    if (!isRunning) {
+      void window.opsAgent.window.restoreFocus();
+      textareaRef.current?.focus();
+    }
+  }, [isRunning]);
+
   // When entering edit mode, prefill the textarea with the original message
   // content (stripped of any leading @host mention the user may have typed —
   // we keep it as-is so they can edit the full original text).
@@ -202,6 +216,7 @@ export function MessageInput({
           rows={2}
           className="flex-1 resize-none rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
           disabled={isRunning}
+          autoFocus
         />
         {isRunning ? (
           <Button variant="danger" onClick={onCancel}>

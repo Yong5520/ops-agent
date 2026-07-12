@@ -3,7 +3,9 @@ import type {
   CommandType,
   AuthorizationStatus,
   HostConfig,
+  TodoItem,
 } from '../../shared/types.js';
+import type { PlanApprovalResult, ModeChangeCallback } from './tools/exit-plan-mode.js';
 
 // Agent loop input parameters.
 export interface AgentLoopParams {
@@ -14,12 +16,17 @@ export interface AgentLoopParams {
   maxSteps?: number;
   // When aborted, the loop stops as soon as the current stream step yields.
   abortSignal?: AbortSignal;
-  // Streaming callbacks — invoked from the main process to drive the UI.
+  // Streaming callbacks - invoked from the main process to drive the UI.
   onTextStream: (text: string) => void;
   onToolCall: (info: ToolCallInfo) => void;
   onToolResult: (result: ToolCallResult) => void;
-  // Authorization callback — async, resolves when user approves/rejects.
+  // Authorization callback - async, resolves when user approves/rejects.
   onAuthorizationRequired: (request: AuthorizationRequest) => Promise<AuthorizationResponse>;
+  onTodosUpdate?: (todos: TodoItem[]) => void;
+  // Plan approval callback - resolves when user approves/rejects plan (P0-1.B)
+  onPlanApproval?: (plan: string) => Promise<PlanApprovalResult>;
+  // Mode change callback - notifies renderer when ExitPlanMode switches mode (P0-1.B fix)
+  onModeChange?: ModeChangeCallback;
   onComplete: (finalMessage: string) => void;
   onError: (error: Error) => void;
 }
@@ -47,7 +54,7 @@ export interface ToolCallResult {
   durationMs?: number;
   blockedReason?: string;
   authorization: AuthorizationStatus;
-  // When true, this is an incremental chunk during streaming output —
+  // When true, this is an incremental chunk during streaming output -
   // the UI should append to the existing card's output rather than replace.
   partial?: boolean;
 }
