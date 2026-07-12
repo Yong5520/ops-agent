@@ -65,9 +65,12 @@ export const Channels = {
     // Plan approval (P0-1.B)
     PLAN_APPROVAL_REQUEST: 'agent:plan-approval-request',
     MODE_CHANGE: 'agent:mode-change',
+    // AskUserQuestion (P1-4)
+    ASK_USER_REQUEST: 'agent:ask-user-request',
     // Handler: renderer -> main (via ipcMain.handle)
     AUTHORIZATION_RESPONSE: 'agent:authorization-response',
     PLAN_APPROVAL_RESPONSE: 'agent:plan-approval-response',
+    ASK_USER_RESPONSE: 'agent:ask-user-response',
   },
   Tasks: {
     LIST: 'tasks:list',

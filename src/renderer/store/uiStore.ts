@@ -18,10 +18,42 @@ interface ConfirmState extends ConfirmOptions {
   resolve: ((value: boolean) => void) | null;
 }
 
+// AskUserQuestion dialog state (P1-4). Mirrors the confirm() Promise pattern.
+// The main process calls onAskUser -> renderer shows AskUserDialog -> user
+// responds -> Promise resolves with answers.
+interface AskUserOption {
+  label: string;
+  description?: string;
+}
+
+interface AskUserQuestionItem {
+  question: string;
+  header: string;
+  options: AskUserOption[];
+  multiSelect: boolean;
+}
+
+export interface AskUserAnswer {
+  question: string;
+  answer: string;
+  isOther?: boolean;
+  notes?: string;
+}
+
+interface AskUserState {
+  open: boolean;
+  sessionId: string;
+  questions: AskUserQuestionItem[];
+  resolve: ((answers: AskUserAnswer[]) => void) | null;
+}
+
 interface UiStore {
   confirmState: ConfirmState;
   confirm: (options: ConfirmOptions) => Promise<boolean>;
   resolveConfirm: (value: boolean) => void;
+  askUserState: AskUserState;
+  askUser: (sessionId: string, questions: AskUserQuestionItem[]) => Promise<AskUserAnswer[]>;
+  resolveAskUser: (answers: AskUserAnswer[]) => void;
 }
 
 const initialConfirmState: ConfirmState = {
@@ -31,6 +63,13 @@ const initialConfirmState: ConfirmState = {
   confirmLabel: '确定',
   cancelLabel: '取消',
   variant: 'primary',
+  resolve: null,
+};
+
+const initialAskUserState: AskUserState = {
+  open: false,
+  sessionId: '',
+  questions: [],
   resolve: null,
 };
 
@@ -56,5 +95,25 @@ export const useUiStore = create<UiStore>((set, get) => ({
     const { resolve } = get().confirmState;
     resolve?.(value);
     set({ confirmState: initialConfirmState });
+  },
+
+  askUserState: initialAskUserState,
+
+  askUser: (sessionId, questions) =>
+    new Promise<AskUserAnswer[]>((resolve) => {
+      set({
+        askUserState: {
+          open: true,
+          sessionId,
+          questions,
+          resolve,
+        },
+      });
+    }),
+
+  resolveAskUser: (answers) => {
+    const { resolve } = get().askUserState;
+    resolve?.(answers);
+    set({ askUserState: initialAskUserState });
   },
 }));

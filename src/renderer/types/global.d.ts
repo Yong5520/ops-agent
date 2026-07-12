@@ -112,6 +112,37 @@ interface AgentModeChangeEvent {
   mode: SafetyMode;
 }
 
+// AskUserQuestion types (P1-4) - mirrors preload-api.ts
+interface AskUserOption {
+  label: string;
+  description?: string;
+}
+
+interface AskUserQuestionItem {
+  question: string;
+  header: string;
+  options: AskUserOption[];
+  multiSelect: boolean;
+}
+
+interface AskUserAnswer {
+  question: string;
+  answer: string;
+  isOther?: boolean;
+  notes?: string;
+}
+
+interface AgentAskUserRequestEvent {
+  sessionId: string;
+  questions: AskUserQuestionItem[];
+}
+
+interface AgentAskUserResponse {
+  sessionId: string;
+  answers: AskUserAnswer[];
+  dismissed?: boolean;
+}
+
 interface SftpDirEntry {
   name: string;
   longname: string;
@@ -195,6 +226,7 @@ interface OpsAgentApi {
     cancel: (sessionId: string) => Promise<void>;
     respondAuthorization: (response: AgentAuthorizationResponse) => Promise<void>;
     respondPlanApproval: (response: AgentPlanApprovalResponse) => Promise<void>;
+    respondAskUser: (response: AgentAskUserResponse) => Promise<void>;
     onTextStream: (handler: (event: AgentTextStreamEvent) => void) => () => void;
     onToolCall: (handler: (event: AgentToolCallEvent) => void) => () => void;
     onToolResult: (handler: (event: AgentToolResultEvent) => void) => () => void;
@@ -204,6 +236,7 @@ interface OpsAgentApi {
     onTodosUpdate: (handler: (event: AgentTodosUpdateEvent) => void) => () => void;
     onPlanApprovalRequest: (handler: (event: AgentPlanApprovalRequestEvent) => void) => () => void;
     onModeChange: (handler: (event: AgentModeChangeEvent) => void) => () => void;
+    onAskUserRequest: (handler: (event: AgentAskUserRequestEvent) => void) => () => void;
   };
   tasks: {
     list: (sessionId: string) => Promise<TodoItem[]>;

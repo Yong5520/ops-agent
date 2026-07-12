@@ -1,6 +1,8 @@
 import { NavLink, useLocation } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { AskUserDialog } from './AskUserDialog.js';
+import { useUiStore } from '../store/uiStore.js';
 
 interface AppShellProps {
   children: ReactNode;
@@ -92,6 +94,23 @@ function NavIcon({ name }: { name: string }) {
 
 export function AppShell({ children }: AppShellProps) {
   const location = useLocation();
+  const { askUser } = useUiStore();
+  const askUserRef = useRef(askUser);
+  askUserRef.current = askUser;
+
+  // Subscribe to ask-user requests from the agent (P1-4)
+  useEffect(() => {
+    const unsubscribe = window.opsAgent.agent.onAskUserRequest(async (event) => {
+      const answers = await askUserRef.current(event.sessionId, event.questions);
+      window.opsAgent.agent.respondAskUser({
+        sessionId: event.sessionId,
+        answers,
+        dismissed: answers.some((a) => a.answer === '(用户取消)'),
+      });
+    });
+    return unsubscribe;
+  }, []);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100">
       <aside className="flex w-14 flex-col items-center border-r border-zinc-800 bg-zinc-900 py-4">
@@ -112,6 +131,7 @@ export function AppShell({ children }: AppShellProps) {
       </aside>
       <main className="flex flex-1 min-h-0 flex-col overflow-hidden">{children}</main>
       <ConfirmDialog />
+      <AskUserDialog />
     </div>
   );
 }

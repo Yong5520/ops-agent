@@ -6,6 +6,7 @@ import type {
   TodoItem,
 } from '../../shared/types.js';
 import type { PlanApprovalResult, ModeChangeCallback } from './tools/exit-plan-mode.js';
+import type { AskUserCallback } from './tools/ask-user.js';
 
 // Agent loop input parameters.
 export interface AgentLoopParams {
@@ -27,6 +28,8 @@ export interface AgentLoopParams {
   onPlanApproval?: (plan: string) => Promise<PlanApprovalResult>;
   // Mode change callback - notifies renderer when ExitPlanMode switches mode (P0-1.B fix)
   onModeChange?: ModeChangeCallback;
+  // AskUserQuestion callback - resolves with user's answers (P1-4)
+  onAskUser?: AskUserCallback;
   onComplete: (finalMessage: string) => void;
   onError: (error: Error) => void;
 }

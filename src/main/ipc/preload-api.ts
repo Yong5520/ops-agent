@@ -16,6 +16,7 @@ import type {
   SafetyMode,
   TodoItem,
 } from '../../shared/types.js';
+import type { AskUserQuestionItem, AskUserAnswer } from '../agent/tools/ask-user.js';
 
 // Strongly-typed surface exposed to the renderer via contextBridge.
 // The renderer accesses these as `window.opsAgent.*`.
@@ -112,6 +113,18 @@ export interface AgentModeChangeEvent {
   mode: SafetyMode;
 }
 
+// AskUserQuestion events (P1-4)
+export interface AgentAskUserRequestEvent {
+  sessionId: string;
+  questions: AskUserQuestionItem[];
+}
+
+export interface AgentAskUserResponse {
+  sessionId: string;
+  answers: AskUserAnswer[];
+  dismissed?: boolean; // true if user pressed Esc / cancelled
+}
+
 export interface SftpDirEntry {
   name: string;
   longname: string;
@@ -202,6 +215,7 @@ export interface OpsAgentApi {
     cancel: (sessionId: string) => Promise<void>;
     respondAuthorization: (response: AgentAuthorizationResponse) => Promise<void>;
     respondPlanApproval: (response: AgentPlanApprovalResponse) => Promise<void>;
+    respondAskUser: (response: AgentAskUserResponse) => Promise<void>;
     // Event listeners (renderer subscribes to main→renderer events)
     onTextStream: (handler: (event: AgentTextStreamEvent) => void) => () => void;
     onToolCall: (handler: (event: AgentToolCallEvent) => void) => () => void;
@@ -212,6 +226,7 @@ export interface OpsAgentApi {
     onTodosUpdate: (handler: (event: AgentTodosUpdateEvent) => void) => () => void;
     onPlanApprovalRequest: (handler: (event: AgentPlanApprovalRequestEvent) => void) => () => void;
     onModeChange: (handler: (event: AgentModeChangeEvent) => void) => () => void;
+    onAskUserRequest: (handler: (event: AgentAskUserRequestEvent) => void) => () => void;
   };
 
   tasks: {

@@ -12,12 +12,18 @@ import {
   compactMessages,
 } from './context.js';
 import { createBudgetTracker, updateBudget, checkTokenBudget } from './token-budget.js';
+import {
+  createDenialTracker,
+  recordDenial,
+  recordApproval,
+  shouldNudgeAfterDenials,
+} from './denial-tracking.js';
 import type { ModeHolder } from './tools/exit-plan-mode.js';
 import { hostsStore } from '../storage/hosts.js';
 import { modelsStore } from '../storage/models.js';
 import { gatherMultipleHostFacts } from './facts.js';
 import { logger } from '../utils/logger.js';
-import type { AgentLoopParams, SessionContext } from './types.js';
+import type { AgentLoopParams, SessionContext, ToolCallResult } from './types.js';
 
 // Agent main loop - the core of the application.
 //
@@ -95,15 +101,29 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // without recreating the tools object. preExec reads from modeHolder.mode.
     const modeHolder: ModeHolder = { mode: safetyMode };
 
+    // Denial tracker (P1-4): wraps onToolResult to detect when the user
+    // repeatedly rejects authorizations. When the threshold is hit, a nudge
+    // is injected suggesting the model use ask_user to clarify intent.
+    const denialTracker = createDenialTracker();
+    const wrappedOnToolResult = (result: ToolCallResult) => {
+      if (result.authorization === 'rejected' || result.authorization === 'blocked') {
+        recordDenial(denialTracker, result.toolName, result.blockedReason);
+      } else if (result.success) {
+        recordApproval(denialTracker);
+      }
+      params.onToolResult(result);
+    };
+
     const tools = createTools({
       context,
       safetyMode,
       onToolCall: params.onToolCall,
-      onToolResult: params.onToolResult,
+      onToolResult: wrappedOnToolResult,
       onAuthorizationRequired: params.onAuthorizationRequired,
       onTodosUpdate: params.onTodosUpdate,
       onPlanApproval: params.onPlanApproval,
       onModeChange: params.onModeChange,
+      onAskUser: params.onAskUser,
       modeHolder,
     });
 
@@ -342,30 +362,15 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       }
       // ── P0-3.3: Stall detection + token budget continuation ──────────────
       else if (lastFinishReason === 'stop' && toolCallCount > 0 && !abortSignal?.aborted) {
-        // Detect "inconclusive stop": model called tools but stopped without a
-        // substantive conclusion. Two stall patterns:
-        //  (a) short transitional phrase - text < threshold AND matches
-        //      transition words
-        //  (b) zero text after tool calls - model called tools, produced no
-        //      assistant text, and stopped (user sees only tool cards, no analysis)
-        const isTransitionStall =
-          roundText.length > 0 &&
-          roundText.length < STALL_TEXT_THRESHOLD &&
-          STALL_TRANSITION_PATTERN.test(roundText);
-        const isEmptyStall = roundText.length === 0;
-
-        if ((isTransitionStall || isEmptyStall) && nudgeCount < MAX_NUDGE_ROUNDS) {
-          // Existing nudge for inconclusive stop
-          nudgeCount++;
+        // P1-4: Check denial threshold first - if the user repeatedly rejected
+        // authorizations, nudge the model to use ask_user instead of retrying.
+        // This takes priority over the conclusion nudge because the model needs
+        // user direction to proceed.
+        const denialNudge = shouldNudgeAfterDenials(denialTracker);
+        if (denialNudge.shouldNudge) {
           logger.info(
-            `[Agent] Detected inconclusive stop (toolCalls=${toolCallCount}, text=${roundText.length} chars); nudging for conclusion, round ${nudgeCount}/${MAX_NUDGE_ROUNDS}`,
+            `[Agent] Denial threshold hit (${denialTracker.consecutiveDenials} consecutive), nudging to use ask_user`,
           );
-
-          // CRITICAL: Use result.response.messages (not roundText) so the next
-          // round sees the full assistant message INCLUDING tool calls and tool
-          // results. Appending only roundText would strip tool context - the
-          // nudge message would reference results the model cannot see,
-          // risking hallucination or redundant re-runs.
           const response = await result.response;
           messages = [
             ...messages,
@@ -373,23 +378,42 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
             {
               role: 'user' as const,
               content:
-                '\u8bf7\u57fa\u4e8e\u4ee5\u4e0a\u5df2\u6267\u884c\u7684\u547d\u4ee4\u7ed3\u679c\uff0c\u7ed9\u51fa\u4f60\u7684\u5b9e\u8d28\u6027\u5206\u6790\u7ed3\u8bba\u3002\u5982\u679c\u8bca\u65ad\u4fe1\u606f\u5df2\u8db3\u591f\uff0c\u8bf7\u603b\u7ed3\u53d1\u73b0\u548c\u7ed3\u8bba\uff1b\u5982\u679c\u8fd8\u9700\u66f4\u591a\u4fe1\u606f\uff0c\u8bf7\u7ee7\u7eed\u6267\u884c\u547d\u4ee4\u3002\u4e0d\u8981\u53ea\u8f93\u51fa\u201c\u8ba9\u6211\u7ee7\u7eed\u68c0\u67e5\u201d\u4e4b\u7c7b\u7684\u58f0\u660e\u3002',
+                `用户已连续 ${denialTracker.consecutiveDenials} 次拒绝操作授权` +
+                (denialTracker.lastDeniedCommand
+                  ? `（最近拒绝: ${denialTracker.lastDeniedCommand}）`
+                  : '') +
+                `。可能的原因：命令不被信任、需求不明确、或操作目标有误。` +
+                `请使用 ask_user 工具向用户提问，确认正确的执行路径。不要盲目重试被拒绝的命令。`,
             },
           ];
           fullText += '\n\n';
           params.onTextStream('\n\n');
           stalled = true;
         } else {
-          // P0-3.3: Token budget continuation - if budget allows, nudge to continue
-          const budget = checkTokenBudget(budgetTracker, MAX_CONTINUATIONS);
-          if (budget.canContinue && budgetTracker.continuationCount < MAX_CONTINUATIONS) {
-            budgetTracker.continuationCount++;
-            const pct = Math.round(
-              (budgetTracker.totalTokensUsed / budgetTracker.contextWindow) * 100,
-            );
+          // Detect "inconclusive stop": model called tools but stopped without a
+          // substantive conclusion. Two stall patterns:
+          //  (a) short transitional phrase - text < threshold AND matches
+          //      transition words
+          //  (b) zero text after tool calls - model called tools, produced no
+          //      assistant text, and stopped (user sees only tool cards, no analysis)
+          const isTransitionStall =
+            roundText.length > 0 &&
+            roundText.length < STALL_TEXT_THRESHOLD &&
+            STALL_TRANSITION_PATTERN.test(roundText);
+          const isEmptyStall = roundText.length === 0;
+
+          if ((isTransitionStall || isEmptyStall) && nudgeCount < MAX_NUDGE_ROUNDS) {
+            // Existing nudge for inconclusive stop
+            nudgeCount++;
             logger.info(
-              `[Agent] Token budget continuation ${budgetTracker.continuationCount}/${MAX_CONTINUATIONS} (${pct}% used, ${budget.remainingTokens} tokens remaining)`,
+              `[Agent] Detected inconclusive stop (toolCalls=${toolCallCount}, text=${roundText.length} chars); nudging for conclusion, round ${nudgeCount}/${MAX_NUDGE_ROUNDS}`,
             );
+
+            // CRITICAL: Use result.response.messages (not roundText) so the next
+            // round sees the full assistant message INCLUDING tool calls and tool
+            // results. Appending only roundText would strip tool context - the
+            // nudge message would reference results the model cannot see,
+            // risking hallucination or redundant re-runs.
             const response = await result.response;
             messages = [
               ...messages,
@@ -397,23 +421,48 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
               {
                 role: 'user' as const,
                 content:
-                  '\u8bf7\u7ee7\u7eed\u6267\u884c\u672a\u5b8c\u6210\u7684\u4efb\u52a1\uff0c\u4e0d\u8981\u603b\u7ed3\u3002',
+                  '\u8bf7\u57fa\u4e8e\u4ee5\u4e0a\u5df2\u6267\u884c\u7684\u547d\u4ee4\u7ed3\u679c\uff0c\u7ed9\u51fa\u4f60\u7684\u5b9e\u8d28\u6027\u5206\u6790\u7ed3\u8bba\u3002\u5982\u679c\u8bca\u65ad\u4fe1\u606f\u5df2\u8db3\u591f\uff0c\u8bf7\u603b\u7ed3\u53d1\u73b0\u548c\u7ed3\u8bba\uff1b\u5982\u679c\u8fd8\u9700\u66f4\u591a\u4fe1\u606f\uff0c\u8bf7\u7ee7\u7eed\u6267\u884c\u547d\u4ee4\u3002\u4e0d\u8981\u53ea\u8f93\u51fa\u201c\u8ba9\u6211\u7ee7\u7eed\u68c0\u67e5\u201d\u4e4b\u7c7b\u7684\u58f0\u660e\u3002',
               },
             ];
             fullText += '\n\n';
             params.onTextStream('\n\n');
             stalled = true;
           } else {
-            if (budget.reason === 'budget_exhausted') {
-              logger.info(
-                `[Agent] Token budget exhausted (${budgetTracker.totalTokensUsed}/${budgetTracker.contextWindow} tokens), stopping`,
+            // P0-3.3: Token budget continuation - if budget allows, nudge to continue
+            const budget = checkTokenBudget(budgetTracker, MAX_CONTINUATIONS);
+            if (budget.canContinue && budgetTracker.continuationCount < MAX_CONTINUATIONS) {
+              budgetTracker.continuationCount++;
+              const pct = Math.round(
+                (budgetTracker.totalTokensUsed / budgetTracker.contextWindow) * 100,
               );
-            } else if (budget.reason === 'diminishing_returns') {
               logger.info(
-                `[Agent] Diminishing returns detected, stopping (last delta=${budgetTracker.lastDeltaTokens} tokens)`,
+                `[Agent] Token budget continuation ${budgetTracker.continuationCount}/${MAX_CONTINUATIONS} (${pct}% used, ${budget.remainingTokens} tokens remaining)`,
               );
+              const response = await result.response;
+              messages = [
+                ...messages,
+                ...response.messages,
+                {
+                  role: 'user' as const,
+                  content:
+                    '\u8bf7\u7ee7\u7eed\u6267\u884c\u672a\u5b8c\u6210\u7684\u4efb\u52a1\uff0c\u4e0d\u8981\u603b\u7ed3\u3002',
+                },
+              ];
+              fullText += '\n\n';
+              params.onTextStream('\n\n');
+              stalled = true;
+            } else {
+              if (budget.reason === 'budget_exhausted') {
+                logger.info(
+                  `[Agent] Token budget exhausted (${budgetTracker.totalTokensUsed}/${budgetTracker.contextWindow} tokens), stopping`,
+                );
+              } else if (budget.reason === 'diminishing_returns') {
+                logger.info(
+                  `[Agent] Diminishing returns detected, stopping (last delta=${budgetTracker.lastDeltaTokens} tokens)`,
+                );
+              }
+              stalled = false;
             }
-            stalled = false;
           }
         }
       } else {

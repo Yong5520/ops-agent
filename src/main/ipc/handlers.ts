@@ -18,9 +18,11 @@ import type {
   AgentRunRequest,
   AgentAuthorizationResponse,
   AgentPlanApprovalResponse,
+  AgentAskUserResponse,
 } from './preload-api.js';
 import type { TodoItem } from '../../shared/types.js';
 import type { PlanApprovalResult } from '../agent/tools/exit-plan-mode.js';
+import type { AskUserAnswer } from '../agent/tools/ask-user.js';
 
 // Register all IPC handlers between renderer and main.
 // Called once from electron/main.ts during app.whenReady().
@@ -34,6 +36,10 @@ const pendingAuthorizations = new Map<string, (response: AuthorizationResponse) 
 // Pending plan approval requests keyed by sessionId (P0-1.B).
 // Only one plan approval can be pending per session at a time.
 const pendingPlanApprovals = new Map<string, (result: PlanApprovalResult) => void>();
+
+// Pending ask-user requests keyed by sessionId (P1-4).
+// Only one question dialog can be pending per session at a time.
+const pendingAskUser = new Map<string, (answers: AskUserAnswer[]) => void>();
 
 // Active agent loops keyed by sessionId. Each entry holds the AbortController
 // used to genuinely terminate the streaming loop when the user clicks Stop.
@@ -258,6 +264,37 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         // Notify renderer to update its safetyMode state (P0-1.B fix: state desync)
         win.webContents.send(Channels.Agent.MODE_CHANGE, { sessionId, mode: newMode });
       },
+      onAskUser: (questions) => {
+        // Send questions to renderer for user to answer, wait for response (P1-4)
+        win.webContents.send(Channels.Agent.ASK_USER_REQUEST, {
+          sessionId: request.sessionId,
+          questions,
+        });
+        return new Promise<AskUserAnswer[]>((resolve) => {
+          // Auto-dismiss after 10 minutes to prevent infinite hangs
+          const timeoutId = setTimeout(
+            () => {
+              if (pendingAskUser.has(request.sessionId)) {
+                pendingAskUser.delete(request.sessionId);
+                logger.warn(`[Agent] Ask-user timed out for session ${request.sessionId}`);
+                resolve([
+                  {
+                    question: questions[0]?.question ?? '',
+                    answer: '(超时未响应)',
+                    isOther: true,
+                  },
+                ]);
+              }
+            },
+            10 * 60 * 1000,
+          );
+
+          pendingAskUser.set(request.sessionId, (answers) => {
+            clearTimeout(timeoutId);
+            resolve(answers);
+          });
+        });
+      },
     })
       .catch((err) => {
         logger.error(`[Agent] Unhandled error in loop: ${err.message}`);
@@ -321,6 +358,19 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       }
     },
   );
+
+  // ---------- AskUser Response (P1-4) ----------
+  ipcMain.handle(Channels.Agent.ASK_USER_RESPONSE, async (_e, response: AgentAskUserResponse) => {
+    const resolver = pendingAskUser.get(response.sessionId);
+    if (resolver) {
+      pendingAskUser.delete(response.sessionId);
+      // If the user dismissed the dialog, response.answers contains
+      // placeholder entries with answer='(用户取消)' set by the renderer.
+      resolver(response.answers);
+    } else {
+      logger.warn(`[Agent] Ask-user response for unknown session: ${response.sessionId}`);
+    }
+  });
 
   // ---------- Tasks (TodoWrite) ----------
   ipcMain.handle(Channels.Tasks.LIST, async (_e, sessionId: string) => {

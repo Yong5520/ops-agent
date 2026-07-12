@@ -73,6 +73,7 @@ const api: OpsAgentApi = {
     respondAuthorization: (response) =>
       ipcRenderer.invoke('agent:authorization-response', response),
     respondPlanApproval: (response) => ipcRenderer.invoke('agent:plan-approval-response', response),
+    respondAskUser: (response) => ipcRenderer.invoke('agent:ask-user-response', response),
     onTextStream: (handler) => {
       const listener = (_e: unknown, event: unknown) =>
         handler(event as Parameters<typeof handler>[0]);
@@ -126,6 +127,12 @@ const api: OpsAgentApi = {
         handler(event as Parameters<typeof handler>[0]);
       ipcRenderer.on('agent:mode-change', listener);
       return () => ipcRenderer.removeListener('agent:mode-change', listener);
+    },
+    onAskUserRequest: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:ask-user-request', listener);
+      return () => ipcRenderer.removeListener('agent:ask-user-request', listener);
     },
   },
 

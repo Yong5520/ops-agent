@@ -54,7 +54,7 @@ const VERIFICATION_TASKS = [
 
 // Export for use in dev tools console
 if (typeof window !== 'undefined') {
-  (window as any).__runVerificationTasks = async function () {
+  (window as unknown as Record<string, unknown>).__runVerificationTasks = async function () {
     console.log('=== OpsAgent 端到端验证任务 ===');
     console.log(`共 ${VERIFICATION_TASKS.length} 个任务`);
     console.log('请将以下任务逐一粘贴到对话框中发送：\n');

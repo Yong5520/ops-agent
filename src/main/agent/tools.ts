@@ -23,6 +23,7 @@ import {
   type PlanApprovalResult,
   type ModeChangeCallback,
 } from './tools/exit-plan-mode.js';
+import { createAskUserTool, type AskUserCallback } from './tools/ask-user.js';
 
 // Tool factory — creates the tools object for a single agent loop invocation.
 // Tools close over the session context and streaming callbacks so they can:
@@ -42,6 +43,8 @@ export interface ToolFactoryDeps {
   onTodosUpdate?: (todos: TodoItem[]) => void;
   onPlanApproval?: (plan: string) => Promise<PlanApprovalResult>;
   onModeChange?: ModeChangeCallback;
+  // AskUserQuestion (P1-4): lets the model ask the user clarifying questions.
+  onAskUser?: AskUserCallback;
   modeHolder: ModeHolder;
 }
 
@@ -55,6 +58,7 @@ export function createTools(deps: ToolFactoryDeps) {
     onTodosUpdate,
     onPlanApproval,
     onModeChange,
+    onAskUser,
     modeHolder,
   } = deps;
   const securityConfig = getEffectiveConfig(safetyMode);
@@ -69,6 +73,9 @@ export function createTools(deps: ToolFactoryDeps) {
   const exitPlanModeTool = onPlanApproval
     ? createExitPlanModeTool(context.sessionId, onPlanApproval, modeHolder, onModeChange)
     : undefined;
+
+  // AskUserQuestion tool (P1-4): lets the model ask clarifying questions
+  const askUserTool = onAskUser ? createAskUserTool(onAskUser) : undefined;
 
   // ── Host resolution helper ──────────────────────────────────────────────
   // Resolve a host name (from AI tool call) to a HostConfig. Falls back to
@@ -868,6 +875,7 @@ export function createTools(deps: ToolFactoryDeps) {
     todo_write: todoWriteTool,
     update_memory: updateMemoryTool,
     ...(exitPlanModeTool ? { exit_plan_mode: exitPlanModeTool } : {}),
+    ...(askUserTool ? { ask_user: askUserTool } : {}),
   };
 }
 
