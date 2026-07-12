@@ -1,4 +1,5 @@
 import { streamText } from 'ai';
+import type { CoreSystemMessage, CoreMessage } from 'ai';
 import { getActiveModel, validateModelExists } from './providers.js';
 import { createTools } from './tools.js';
 import { buildSystemPrompt } from './system-prompt.js';
@@ -70,7 +71,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       .map((h) => ({ id: h.id, name: h.name }));
     const hostFacts = await gatherMultipleHostFacts(hostInfos);
 
-    const system = buildSystemPrompt({
+    const { staticPrefix, dynamicSuffix } = buildSystemPrompt({
       selectedHostIds: hostIds,
       safetyMode,
       hostFacts,
@@ -91,9 +92,31 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
 
     // ── 4. Load + compress message history ─────────────────────────────────
     const history = await compressContext(loadMessages(sessionId), { sessionId, model });
-    let messages = buildMessagesForCall(history, userMessage);
 
-    // Save user message immediately (assistant message saved after streaming)
+    // Dynamic suffix is prepended to the user message for the API call only.
+    // This keeps the static prefix cacheable while still providing runtime
+    // context (disk usage, failed services, safety mode) to the model.
+    // The original userMessage (without suffix) is saved to the DB.
+    const enhancedUserMessage = dynamicSuffix
+      ? `[运行时上下文]\n${dynamicSuffix}\n\n---\n\n${userMessage}`
+      : userMessage;
+
+    let messages: CoreMessage[] = [...buildMessagesForCall(history, enhancedUserMessage)];
+
+    // Prepend static system message with prompt-cache marker. The
+    // providerOptions.anthropic.cacheControl tells the Anthropic provider
+    // to cache this block. OpenAI-compatible providers ignore unknown
+    // provider options, so this is safe for all providers.
+    const systemMessage: CoreSystemMessage = {
+      role: 'system',
+      content: staticPrefix,
+      providerOptions: {
+        anthropic: { cacheControl: { type: 'ephemeral' } },
+      },
+    };
+    messages = [systemMessage, ...messages];
+
+    // Save original user message (not enhanced) to DB
     saveUserMessage(sessionId, userMessage);
 
     // ── 5. Create tools ────────────────────────────────────────────────────
@@ -189,7 +212,6 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
         try {
           result = streamText({
             model,
-            system,
             messages,
             tools,
             maxSteps,

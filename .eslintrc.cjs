@@ -12,6 +12,7 @@ module.exports = {
     'out',
     'node_modules',
     'resources',
+    'claude-code',
     '*.config.*',
     'electron.vite.config.*',
   ],
