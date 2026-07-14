@@ -51,13 +51,11 @@ function runMigrations(database: DB): void {
 
   if (currentVersion < 2) {
     logger.info(`Running migration v2: add sessions.host_ids column`);
-    // Add the new host_ids column (JSON array). The legacy host_id column is
-    // kept for backward compatibility but no longer written by new code.
-    database.exec(`ALTER TABLE sessions ADD COLUMN host_ids TEXT`);
+    addColumnIfNotExists(database, 'sessions', 'host_ids', 'TEXT');
     // Backfill host_ids from existing host_id values so old sessions keep
     // working in multi-host mode.
     database.exec(
-      `UPDATE sessions SET host_ids = '["' || host_id || '"]' WHERE host_id IS NOT NULL`,
+      `UPDATE sessions SET host_ids = '["' || host_id || '"]' WHERE host_id IS NOT NULL AND host_ids IS NULL`,
     );
   }
 
@@ -73,37 +71,37 @@ function runMigrations(database: DB): void {
       );
       CREATE INDEX IF NOT EXISTS idx_task_lists_session ON task_lists(session_id);
     `);
-    // plan_mode column (P0-1 Plan Mode): 0=off, 1=on
-    database.exec(`ALTER TABLE sessions ADD COLUMN plan_mode INTEGER DEFAULT 0`);
-    // summary columns (P0-2 Summary persistence)
-    database.exec(`ALTER TABLE sessions ADD COLUMN summary TEXT`);
-    database.exec(`ALTER TABLE sessions ADD COLUMN summary_coverage_index INTEGER DEFAULT 0`);
+    addColumnIfNotExists(database, 'sessions', 'plan_mode', 'INTEGER DEFAULT 0');
+    addColumnIfNotExists(database, 'sessions', 'summary', 'TEXT');
+    addColumnIfNotExists(database, 'sessions', 'summary_coverage_index', 'INTEGER DEFAULT 0');
 
     // Recreate sessions table with updated CHECK constraint to include 'plan'
-    // SQLite doesn't support ALTER TABLE to modify constraints, so we use the
-    // create-copy-drop-rename pattern with foreign keys temporarily disabled.
-    database.pragma('foreign_keys = OFF');
-    database.exec(`
-      CREATE TABLE sessions_new (
-        id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-        title       TEXT,
-        host_id     TEXT REFERENCES hosts(id) ON DELETE SET NULL,
-        host_ids    TEXT,
-        safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot', 'plan')),
-        status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
-        plan_mode   INTEGER DEFAULT 0,
-        summary     TEXT,
-        summary_coverage_index INTEGER DEFAULT 0,
-        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      INSERT INTO sessions_new (id, title, host_id, host_ids, safety_mode, status, plan_mode, summary, summary_coverage_index, created_at, updated_at)
-      SELECT id, title, host_id, host_ids, safety_mode, status, plan_mode, summary, summary_coverage_index, created_at, updated_at FROM sessions;
-      DROP TABLE sessions;
-      ALTER TABLE sessions_new RENAME TO sessions;
-      CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, updated_at);
-    `);
-    database.pragma('foreign_keys = ON');
+    // Only needed if the existing CHECK doesn't include 'plan'.
+    const needsRecreate = !tableCheckHasPlan(database);
+    if (needsRecreate) {
+      database.pragma('foreign_keys = OFF');
+      database.exec(`
+        CREATE TABLE sessions_new (
+          id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          title       TEXT,
+          host_id     TEXT REFERENCES hosts(id) ON DELETE SET NULL,
+          host_ids    TEXT,
+          safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot', 'plan')),
+          status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+          plan_mode   INTEGER DEFAULT 0,
+          summary     TEXT,
+          summary_coverage_index INTEGER DEFAULT 0,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO sessions_new (id, title, host_id, host_ids, safety_mode, status, plan_mode, summary, summary_coverage_index, created_at, updated_at)
+        SELECT id, title, host_id, host_ids, safety_mode, status, plan_mode, summary, summary_coverage_index, created_at, updated_at FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_new RENAME TO sessions;
+        CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, updated_at);
+      `);
+      database.pragma('foreign_keys = ON');
+    }
   }
 
   if (currentVersion < 4) {
@@ -125,22 +123,45 @@ function runMigrations(database: DB): void {
 
   if (currentVersion < 5) {
     logger.info(`Running migration v5: add audit_logs hash chain columns`);
-    database.exec(`
-      ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT NOT NULL DEFAULT '';
-      ALTER TABLE audit_logs ADD COLUMN row_hash TEXT NOT NULL DEFAULT '';
-      CREATE INDEX IF NOT EXISTS idx_audit_chain ON audit_logs(created_at);
-    `);
+    addColumnIfNotExists(database, 'audit_logs', 'prev_hash', "TEXT NOT NULL DEFAULT ''");
+    addColumnIfNotExists(database, 'audit_logs', 'row_hash', "TEXT NOT NULL DEFAULT ''");
+    database.exec(`CREATE INDEX IF NOT EXISTS idx_audit_chain ON audit_logs(created_at);`);
   }
 
   if (currentVersion < 6) {
     logger.info(`Running migration v6: add context_window column to model_providers`);
-    database.exec(`
-      ALTER TABLE model_providers ADD COLUMN context_window INTEGER;
-    `);
+    addColumnIfNotExists(database, 'model_providers', 'context_window', 'INTEGER');
   }
 
   setUserVersion(database, targetVersion);
   logger.info(`Database schema at v${targetVersion}`);
+}
+
+// Check if a column exists in a table.
+function columnExists(database: DB, table: string, column: string): boolean {
+  const rows = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return rows.some((r) => r.name === column);
+}
+
+// Add a column only if it doesn't already exist (idempotent migration).
+function addColumnIfNotExists(
+  database: DB,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  if (!columnExists(database, table, column)) {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+// Check if sessions.safety_mode CHECK constraint includes 'plan'.
+function tableCheckHasPlan(database: DB): boolean {
+  const sql = database
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'`)
+    .get() as { sql?: string } | undefined;
+  if (!sql?.sql) return false;
+  return sql.sql.includes("'plan'");
 }
 
 function getUserVersion(database: DB): number {

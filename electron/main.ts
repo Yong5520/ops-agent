@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, dialog } from 'electron';
 import { join } from 'node:path';
 import { registerIpcHandlers, cleanupTerminalSessions } from '../src/main/ipc/handlers.js';
 import { initDatabase } from '../src/main/storage/database.js';
@@ -44,12 +44,35 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
-  initDatabase();
-  setResultsBaseDir(join(app.getPath('userData'), 'tool-results'));
-  cleanupOldResults(7);
-  createWindow();
-  if (mainWindow) {
-    registerIpcHandlers(mainWindow);
+  try {
+    initDatabase();
+    setResultsBaseDir(join(app.getPath('userData'), 'tool-results'));
+    cleanupOldResults(7);
+  } catch (err) {
+    logger.error('Startup failed:', err);
+    dialog.showErrorBox(
+      'OpsAgent 启动失败',
+      `初始化失败，应用无法继续运行。\n\n` +
+        `错误: ${err instanceof Error ? err.message : String(err)}\n\n` +
+        `请截图此错误并反馈给开发者。\n` +
+        `路径: ${app.getPath('userData')}`,
+    );
+    app.quit();
+    return;
+  }
+
+  try {
+    createWindow();
+    if (mainWindow) {
+      registerIpcHandlers(mainWindow);
+    }
+  } catch (err) {
+    logger.error('Window creation failed:', err);
+    dialog.showErrorBox(
+      'OpsAgent 窗口创建失败',
+      `窗口创建失败。\n\n错误: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    app.quit();
   }
 
   app.on('activate', () => {
@@ -68,8 +91,18 @@ app.on('window-all-closed', () => {
 
 process.on('uncaughtException', (err) => {
   logger.error('Uncaught exception:', err);
+  dialog.showErrorBox(
+    'OpsAgent 发生异常',
+    `应用遇到未捕获的异常。\n\n错误: ${err.message}\n\n堆栈:\n${err.stack ?? '(无)'}`,
+  );
+  app.quit();
 });
 
 process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled rejection:', reason);
+  dialog.showErrorBox(
+    'OpsAgent 发生异常',
+    `应用遇到未处理的 Promise 拒绝。\n\n原因: ${reason instanceof Error ? reason.message : String(reason)}`,
+  );
+  app.quit();
 });

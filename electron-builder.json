@@ -16,6 +16,17 @@
     "node_modules/better-sqlite3/**/*",
     "node_modules/ssh2/**/*"
   ],
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "allowElevation": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "OpsAgent",
+    "installerLanguages": ["zh_CN", "en_US"],
+    "language": "2052"
+  },
   "win": {
     "target": [
       { "target": "nsis", "arch": ["x64"] }

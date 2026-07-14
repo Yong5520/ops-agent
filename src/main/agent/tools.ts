@@ -337,7 +337,7 @@ export function createTools(deps: ToolFactoryDeps) {
         authorization: rec.authorization,
         exitCode: rec.exitCode,
         durationMs: rec.durationMs,
-        outputSummary: rec.outputSummary,
+        outputSummary: rec.outputSummary ?? rec.blockedReason,
       });
     } catch (err) {
       logger.error('Failed to write audit log:', err);
@@ -1442,20 +1442,28 @@ function formatSshError(err: Error, hostName: string): string {
 // Connection resets, timeouts, and temporary network errors qualify.
 // Authentication failures and command-level errors do not — retrying won't help.
 function isTransientError(err: Error): boolean {
+  if (isConnectionError(err)) return true;
   const msg = err.message;
-  if (msg.includes('SSH_TIMEOUT')) return true;
   if (msg.includes('ECONNRESET')) return true;
   if (msg.includes('EPIPE')) return true;
   if (msg.includes('Keepalive timeout')) return true;
   if (msg.includes('Socket closed')) return true;
-  if (isConnectionError(err)) return true;
   return false;
 }
 
 // Check if an error indicates the SSH connection is broken and should be
 // invalidated. This covers zombie connections where the TCP socket is alive
 // but the SSH session layer is unusable.
+//
+// IMPORTANT: OpsAgentError stores the error category in `.code` (e.g.
+// 'SSH_TIMEOUT'), not in `.message`. The message text is user-facing (e.g.
+// "Command timed out after 60000ms") and does NOT contain the code string.
+// We must check both .code and .message to catch all cases.
 function isConnectionError(err: Error): boolean {
+  // Check OpsAgentError.code first (authoritative category).
+  const code = (err as { code?: string }).code;
+  if (code === 'SSH_TIMEOUT' || code === 'SSH_NOT_CONNECTED') return true;
+
   const msg = err.message;
   if (msg.includes('channel') || msg.includes('Channel')) return true;
   if (msg.includes('MaxSessions')) return true;
@@ -1463,7 +1471,7 @@ function isConnectionError(err: Error): boolean {
   if (msg.includes('EPIPE')) return true;
   if (msg.includes('Socket closed')) return true;
   if (msg.includes('Keepalive timeout')) return true;
-  if (msg.includes('SSH_TIMEOUT')) return true;
+  if (msg.includes('Command timed out')) return true;
   if (msg.includes('Connection lost')) return true;
   return false;
 }
