@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
 import { registerIpcHandlers, cleanupTerminalSessions } from '../src/main/ipc/handlers.js';
 import { initDatabase } from '../src/main/storage/database.js';
+import { cleanupOldResults, setResultsBaseDir } from '../src/main/agent/tool-results.js';
 import { logger } from '../src/main/utils/logger.js';
 
 let mainWindow: BrowserWindow | null = null;
@@ -44,6 +45,8 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(() => {
   initDatabase();
+  setResultsBaseDir(join(app.getPath('userData'), 'tool-results'));
+  cleanupOldResults(7);
   createWindow();
   if (mainWindow) {
     registerIpcHandlers(mainWindow);

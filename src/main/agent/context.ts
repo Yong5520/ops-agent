@@ -29,9 +29,10 @@ const CHARS_PER_TOKEN = 3;
 // Default context window when we can't determine the model's actual size.
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 80_000;
 
-// Only trigger summarization when context exceeds 60% of the model window.
+// Only trigger summarization when context exceeds 85% of the model window.
 // This leaves headroom for the new user message + tool results + response.
-const COMPRESSION_THRESHOLD_RATIO = 0.6;
+// (microcompact/snip still run at 60% for early tool-result truncation)
+const COMPRESSION_THRESHOLD_RATIO = 0.85;
 
 // How many recent messages to always keep intact (never summarized).
 const RECENT_MESSAGES_TO_KEEP = 20;
@@ -96,9 +97,18 @@ const MODEL_CONTEXT_WINDOWS: Array<{ pattern: RegExp; tokens: number }> = [
   { pattern: /^gpt-4-turbo/i, tokens: 128_000 },
   { pattern: /^gpt-4\b/i, tokens: 8_192 }, // original GPT-4 8k
   { pattern: /^gpt-3\.5/i, tokens: 16_000 },
+  // GLM (Zhipu AI) - glm-4 supports 128k, glm-5.2[1m] supports 1M
+  { pattern: /glm.*1m/i, tokens: 1_000_000 },
+  { pattern: /^glm-/i, tokens: 128_000 },
+  // Qwen - newer models support 128k, older ones 32k
+  { pattern: /qwen3/i, tokens: 128_000 },
+  { pattern: /qwen2\.5/i, tokens: 128_000 },
+  { pattern: /qwen2/i, tokens: 32_000 },
+  { pattern: /qwen/i, tokens: 32_000 }, // fallback for older Qwen models
+  // DeepSeek
+  { pattern: /deepseek/i, tokens: 64_000 },
   // Common local models
   { pattern: /llama-3/i, tokens: 8_000 },
-  { pattern: /qwen/i, tokens: 32_000 },
 ];
 
 export function getModelContextWindow(modelName: string): number {
@@ -106,6 +116,18 @@ export function getModelContextWindow(modelName: string): number {
     if (entry.pattern.test(modelName)) return entry.tokens;
   }
   return DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
+// Get context window with DB-configured override priority.
+// Priority: DB context_window > pattern match > default 80k.
+export function getContextWindowForModel(
+  modelName: string,
+  dbContextWindow?: number | null,
+): number {
+  if (dbContextWindow && dbContextWindow > 0) {
+    return dbContextWindow;
+  }
+  return getModelContextWindow(modelName);
 }
 
 // ── Message loading ───────────────────────────────────────────────────────
@@ -178,9 +200,9 @@ export function estimateTokens(messages: CoreMessage[]): number {
 // messages since the last summary.
 export async function compressContext(
   messages: CoreMessage[],
-  opts: { sessionId: string; model: LanguageModel },
+  opts: { sessionId: string; model: LanguageModel; force?: boolean },
 ): Promise<CoreMessage[]> {
-  const { sessionId, model } = opts;
+  const { sessionId, model, force = false } = opts;
   const tokenCount = estimateTokens(messages);
 
   // Determine the threshold based on the model's context window.
@@ -188,12 +210,12 @@ export async function compressContext(
   const contextWindow = getModelContextWindow(model.modelId);
   const threshold = Math.floor(contextWindow * COMPRESSION_THRESHOLD_RATIO);
 
-  if (tokenCount <= threshold) {
+  if (!force && tokenCount <= threshold) {
     return messages;
   }
 
   logger.info(
-    `[Context] Token count ${tokenCount} exceeds threshold ${threshold}, compressing ${messages.length} messages`,
+    `[Context] Token count ${tokenCount} ${force ? '(forced)' : `exceeds threshold ${threshold}`}, compressing ${messages.length} messages`,
   );
 
   // Not enough messages to justify summarization — keep as-is.

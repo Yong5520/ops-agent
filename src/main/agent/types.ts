@@ -30,6 +30,14 @@ export interface AgentLoopParams {
   onModeChange?: ModeChangeCallback;
   // AskUserQuestion callback - resolves with user's answers (P1-4)
   onAskUser?: AskUserCallback;
+  // Context usage callback - notifies renderer of token usage after each
+  // model response so the chat header can display occupancy percentage.
+  onContextUsage?: (event: {
+    sessionId: string;
+    usedTokens: number;
+    totalTokens: number;
+    percentage: number;
+  }) => void;
   onComplete: (finalMessage: string) => void;
   onError: (error: Error) => void;
 }

@@ -1,20 +1,21 @@
 import type { Skill } from './types.js';
 
-// Built-in diagnostic skills. Each skill's promptFragment is injected into
-// the system prompt when enabled, giving the AI structured domain knowledge
-// and a diagnostic procedure to follow.
+// Built-in diagnostic skills. Each skill's content is loaded via
+// /skillName invocation (progressive disclosure - only metadata goes
+// into the system prompt, full content is injected when invoked).
 //
-// Prompt fragments are kept concise (<500 tokens each) to control system
-// prompt size. Only enabled skills are injected.
+// Content is kept concise (<500 tokens each) to control token usage.
 
 export const BUILTIN_SKILLS: Skill[] = [
   {
     name: 'system-diagnosis',
     displayName: '系统全面诊断',
     description: '磁盘、内存、CPU、网络、进程全面检查',
+    whenToUse: '当用户要求"全面检查"或"系统诊断"时',
     triggerKeywords: ['系统', '诊断', '体检', 'system', 'diagnosis', 'health'],
     enabledByDefault: true,
-    promptFragment: `## 技能：系统全面诊断
+    source: 'builtin',
+    content: `## 技能：系统全面诊断
 
 当用户要求"全面检查"或"系统诊断"时，按以下顺序执行：
 
@@ -32,9 +33,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'nginx-diagnosis',
     displayName: 'Nginx 诊断',
     description: '配置测试、状态、日志分析、上游检查',
+    whenToUse: '当用户报告 nginx 相关问题（502/504/服务异常）时',
     triggerKeywords: ['nginx', '502', '504', '网关', 'upstream'],
     enabledByDefault: true,
-    promptFragment: `## 技能：Nginx 诊断
+    source: 'builtin',
+    content: `## 技能：Nginx 诊断
 
 当用户报告 nginx 相关问题（502/504/服务异常）时：
 
@@ -55,9 +58,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'docker-diagnosis',
     displayName: 'Docker 诊断',
     description: '容器状态、资源、日志、网络',
+    whenToUse: '当用户报告 docker/容器相关问题时',
     triggerKeywords: ['docker', '容器', 'container', '镜像', 'image'],
     enabledByDefault: true,
-    promptFragment: `## 技能：Docker 诊断
+    source: 'builtin',
+    content: `## 技能：Docker 诊断
 
 当用户报告 docker/容器相关问题时：
 
@@ -78,9 +83,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'systemd-diagnosis',
     displayName: 'Systemd 诊断',
     description: '失败单元、journal、依赖树',
+    whenToUse: '当用户报告服务管理相关问题时',
     triggerKeywords: ['systemd', 'systemctl', 'service', '服务', 'journal'],
     enabledByDefault: true,
-    promptFragment: `## 技能：Systemd 诊断
+    source: 'builtin',
+    content: `## 技能：Systemd 诊断
 
 当用户报告服务管理相关问题时：
 
@@ -100,9 +107,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'mysql-diagnosis',
     displayName: 'MySQL 诊断',
     description: '进程、慢查询、连接数、复制状态',
+    whenToUse: '当用户报告 MySQL 相关问题时',
     triggerKeywords: ['mysql', 'mariadb', '数据库', '慢查询', 'slow query'],
     enabledByDefault: false,
-    promptFragment: `## 技能：MySQL 诊断
+    source: 'builtin',
+    content: `## 技能：MySQL 诊断
 
 当用户报告 MySQL 相关问题时：
 
@@ -119,9 +128,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'redis-diagnosis',
     displayName: 'Redis 诊断',
     description: 'ping、内存、slowlog、客户端',
+    whenToUse: '当用户报告 Redis 相关问题时',
     triggerKeywords: ['redis', '缓存', 'cache'],
     enabledByDefault: false,
-    promptFragment: `## 技能：Redis 诊断
+    source: 'builtin',
+    content: `## 技能：Redis 诊断
 
 当用户报告 Redis 相关问题时：
 
@@ -138,9 +149,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'security-audit',
     displayName: '安全巡检',
     description: '防火墙、SSH 配置、用户权限、开放端口',
+    whenToUse: '当用户要求安全检查时',
     triggerKeywords: ['安全', 'security', '防火墙', 'firewall', 'ssh', 'audit'],
     enabledByDefault: false,
-    promptFragment: `## 技能：安全巡检
+    source: 'builtin',
+    content: `## 技能：安全巡检
 
 当用户要求安全检查时：
 
@@ -161,9 +174,11 @@ export const BUILTIN_SKILLS: Skill[] = [
     name: 'disk-full',
     displayName: '磁盘空间排查',
     description: '大文件、inode、日志清理',
+    whenToUse: '当用户报告磁盘满或空间不足时',
     triggerKeywords: ['磁盘', 'disk', '空间', '满', 'full', 'no space'],
     enabledByDefault: true,
-    promptFragment: `## 技能：磁盘空间排查
+    source: 'builtin',
+    content: `## 技能：磁盘空间排查
 
 当用户报告磁盘满或空间不足时：
 

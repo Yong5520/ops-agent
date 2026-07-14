@@ -141,6 +141,9 @@ function ModelForm({
   const [endpoint, setEndpoint] = useState(editing?.endpoint ?? '');
   const [apiKey, setApiKey] = useState('');
   const [modelName, setModelName] = useState(editing?.modelName ?? '');
+  const [contextWindow, setContextWindow] = useState(
+    editing?.contextWindow ? String(editing.contextWindow) : '',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -164,6 +167,7 @@ function ModelForm({
         endpoint: endpoint.trim() || getDefaultEndpoint(type),
         apiKey: apiKey.trim() || undefined!,
         modelName: modelName.trim(),
+        contextWindow: contextWindow.trim() ? Number(contextWindow.trim()) : undefined,
       };
       await onSave(input);
     } catch (err) {
@@ -228,6 +232,14 @@ function ModelForm({
           />
         </Field>
       </div>
+      <Field label="上下文窗口大小（可选，单位 tokens。留空则自动推断）">
+        <Input
+          type="number"
+          value={contextWindow}
+          onChange={(e) => setContextWindow(e.target.value)}
+          placeholder="例如: 128000（留空自动推断）"
+        />
+      </Field>
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose} disabled={submitting}>
           取消

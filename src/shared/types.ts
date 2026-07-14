@@ -36,6 +36,7 @@ export interface ModelProvider {
   endpoint: string;
   apiKey?: string; // plaintext only in transit; stored encrypted
   modelName: string;
+  contextWindow?: number; // optional: user-configured context window size in tokens
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -139,6 +140,44 @@ export interface TodoItem {
   status: TodoStatus;
   activeForm?: string;
 }
+
+// ---------- Hooks (PreToolUse / PostToolUse) ----------
+export type HookEvent = 'PreToolUse' | 'PostToolUse';
+export type HookType = 'command' | 'http';
+export type HookPermissionDecision = 'allow' | 'deny' | 'pass';
+
+export interface HookConfig {
+  name: string;
+  event: HookEvent;
+  type: HookType;
+  command?: string; // shell command for type='command' (receives JSON on stdin)
+  url?: string; // webhook URL for type='http'
+  method?: 'POST' | 'GET';
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+}
+
+export interface HookCondition {
+  toolName: string; // glob-style: 'exec', 'exec(*)', 'exec(rm *)', '*'
+  commandPattern?: string; // regex on command input, e.g. 'rm .*'
+}
+
+export interface Hook {
+  id: string;
+  name: string;
+  event: HookEvent;
+  type: HookType;
+  config: HookConfig;
+  condition: HookCondition;
+  enabled: boolean;
+  createdAt: string;
+}
+
+// Input for creating/updating a hook (no id/createdAt).
+export type HookCreateInput = Omit<Hook, 'id' | 'createdAt'>;
+
+// Hook + tool input, passed to hook executors (command/HTTP).
+export type HookInput = Hook & { input?: Record<string, unknown>; result?: unknown };
 
 // ---------- Settings ----------
 export type SettingKey =

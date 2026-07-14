@@ -49,6 +49,7 @@ const api: OpsAgentApi = {
   audit: {
     list: (filter) => ipcRenderer.invoke('audit:list', filter),
     create: (payload) => ipcRenderer.invoke('audit:create', payload),
+    verifyIntegrity: () => ipcRenderer.invoke('audit:verify'),
   },
 
   // Settings
@@ -66,10 +67,33 @@ const api: OpsAgentApi = {
     remove: (id: string) => ipcRenderer.invoke('rules:delete', id),
   },
 
+  // Hooks
+  hooks: {
+    list: () => ipcRenderer.invoke('hooks:list'),
+    create: (payload) => ipcRenderer.invoke('hooks:create', payload),
+    update: (id, payload) => ipcRenderer.invoke('hooks:update', id, payload),
+    remove: (id: string) => ipcRenderer.invoke('hooks:delete', id),
+  },
+
+  // Skills
+  skills: {
+    list: () => ipcRenderer.invoke('skills:list'),
+    getContent: (name: string) => ipcRenderer.invoke('skills:getContent', name),
+    install: (name: string, content: string, description?: string, whenToUse?: string) =>
+      ipcRenderer.invoke('skills:install', name, content, description, whenToUse),
+    remove: (name: string) => ipcRenderer.invoke('skills:delete', name),
+    toggle: (name: string, enabled: boolean) => ipcRenderer.invoke('skills:toggle', name, enabled),
+  },
+
   // Agent
   agent: {
     run: (request) => ipcRenderer.invoke('agent:run', request),
     cancel: (sessionId: string) => ipcRenderer.invoke('agent:cancel', sessionId),
+    compact: (sessionId: string, instructions?: string) =>
+      ipcRenderer.invoke('agent:compact', sessionId, instructions),
+    getContext: (sessionId: string) => ipcRenderer.invoke('agent:getContext', sessionId),
+    quickCommand: (sessionId: string, command: string, hostName?: string) =>
+      ipcRenderer.invoke('agent:quick-command', sessionId, command, hostName),
     respondAuthorization: (response) =>
       ipcRenderer.invoke('agent:authorization-response', response),
     respondPlanApproval: (response) => ipcRenderer.invoke('agent:plan-approval-response', response),
@@ -133,6 +157,12 @@ const api: OpsAgentApi = {
         handler(event as Parameters<typeof handler>[0]);
       ipcRenderer.on('agent:ask-user-request', listener);
       return () => ipcRenderer.removeListener('agent:ask-user-request', listener);
+    },
+    onContextUsage: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:context-usage', listener);
+      return () => ipcRenderer.removeListener('agent:context-usage', listener);
     },
   },
 

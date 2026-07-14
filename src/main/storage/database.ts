@@ -42,7 +42,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 3;
+  const targetVersion = 6;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -104,6 +104,39 @@ function runMigrations(database: DB): void {
       CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, updated_at);
     `);
     database.pragma('foreign_keys = ON');
+  }
+
+  if (currentVersion < 4) {
+    logger.info(`Running migration v4: add hooks table`);
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS hooks (
+        id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        name        TEXT NOT NULL,
+        event       TEXT NOT NULL CHECK (event IN ('PreToolUse', 'PostToolUse')),
+        type        TEXT NOT NULL CHECK (type IN ('command', 'http')),
+        config      TEXT NOT NULL,
+        condition   TEXT NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_hooks_event ON hooks(event, enabled);
+    `);
+  }
+
+  if (currentVersion < 5) {
+    logger.info(`Running migration v5: add audit_logs hash chain columns`);
+    database.exec(`
+      ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT NOT NULL DEFAULT '';
+      ALTER TABLE audit_logs ADD COLUMN row_hash TEXT NOT NULL DEFAULT '';
+      CREATE INDEX IF NOT EXISTS idx_audit_chain ON audit_logs(created_at);
+    `);
+  }
+
+  if (currentVersion < 6) {
+    logger.info(`Running migration v6: add context_window column to model_providers`);
+    database.exec(`
+      ALTER TABLE model_providers ADD COLUMN context_window INTEGER;
+    `);
   }
 
   setUserVersion(database, targetVersion);

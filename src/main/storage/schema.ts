@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
   endpoint    TEXT NOT NULL,
   api_key     TEXT NOT NULL,
   model_name  TEXT NOT NULL,
+  context_window INTEGER,
   is_active   INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -93,6 +94,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   exit_code       INTEGER,
   duration_ms     INTEGER,
   output_summary  TEXT,
+  prev_hash       TEXT NOT NULL DEFAULT '',
+  row_hash        TEXT NOT NULL DEFAULT '',
   created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_host ON audit_logs(host_name, created_at);
@@ -125,4 +128,17 @@ CREATE TABLE IF NOT EXISTS task_lists (
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_task_lists_session ON task_lists(session_id);
+
+-- 4.10 Hooks (PreToolUse / PostToolUse)
+CREATE TABLE IF NOT EXISTS hooks (
+  id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  name        TEXT NOT NULL,
+  event       TEXT NOT NULL CHECK (event IN ('PreToolUse', 'PostToolUse')),
+  type        TEXT NOT NULL CHECK (type IN ('command', 'http')),
+  config      TEXT NOT NULL,
+  condition   TEXT NOT NULL,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hooks_event ON hooks(event, enabled);
 `;

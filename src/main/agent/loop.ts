@@ -9,8 +9,9 @@ import {
   buildMessagesForCall,
   saveUserMessage,
   saveAssistantMessage,
-  getModelContextWindow,
+  getContextWindowForModel,
   compactMessages,
+  estimateTokens,
 } from './context.js';
 import { createBudgetTracker, updateBudget, checkTokenBudget } from './token-budget.js';
 import {
@@ -89,6 +90,9 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       await validateModelExists(activeProvider);
     }
     const model = getActiveModel();
+
+    // Resolve context window: DB-configured > pattern match > default 80k
+    const contextWindow = getContextWindowForModel(model.modelId, activeProvider?.contextWindow);
 
     // ── 4. Load + compress message history ─────────────────────────────────
     const history = await compressContext(loadMessages(sessionId), { sessionId, model });
@@ -180,7 +184,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // (tools called + short text), checks if budget allows continuation.
     // Also detects diminishing returns after 3+ continuations.
     const MAX_CONTINUATIONS = 3;
-    const budgetTracker = createBudgetTracker(getModelContextWindow(model.modelId));
+    const budgetTracker = createBudgetTracker(contextWindow);
 
     let nudgeCount = 0;
     let toolCallCount = 0;
@@ -283,6 +287,22 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
                     promptTokens: part.usage.promptTokens,
                     completionTokens: part.usage.completionTokens,
                     totalTokens: part.usage.totalTokens,
+                  });
+                  // Emit context-usage event for the renderer to display
+                  // the current context occupancy in the chat header.
+                  // Use budgetTracker.totalTokensUsed (accumulated) as primary
+                  // source since many OpenAI-compatible providers return
+                  // promptTokens: 0 in streaming finish events.
+                  const usedTokens =
+                    budgetTracker.totalTokensUsed > 0
+                      ? budgetTracker.totalTokensUsed
+                      : (part.usage.promptTokens ?? estimateTokens(messages));
+                  const percentage = Math.round((usedTokens / contextWindow) * 100);
+                  params.onContextUsage?.({
+                    sessionId,
+                    usedTokens,
+                    totalTokens: contextWindow,
+                    percentage: Math.min(percentage, 100),
                   });
                 }
                 logger.info(

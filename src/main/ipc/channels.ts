@@ -39,6 +39,7 @@ export const Channels = {
   Audit: {
     LIST: 'audit:list',
     CREATE: 'audit:create',
+    VERIFY: 'audit:verify',
   },
   Settings: {
     GET: 'settings:get',
@@ -51,9 +52,25 @@ export const Channels = {
     UPDATE: 'rules:update',
     DELETE: 'rules:delete',
   },
+  Hooks: {
+    LIST: 'hooks:list',
+    CREATE: 'hooks:create',
+    UPDATE: 'hooks:update',
+    DELETE: 'hooks:delete',
+  },
+  Skills: {
+    LIST: 'skills:list',
+    GET_CONTENT: 'skills:getContent',
+    INSTALL: 'skills:install',
+    DELETE: 'skills:delete',
+    TOGGLE: 'skills:toggle',
+  },
   Agent: {
     RUN: 'agent:run',
     CANCEL: 'agent:cancel',
+    COMPACT: 'agent:compact',
+    GET_CONTEXT: 'agent:getContext',
+    QUICK_COMMAND: 'agent:quick-command',
     // Events: main -> renderer (via webContents.send)
     TEXT_STREAM: 'agent:text-stream',
     TOOL_CALL: 'agent:tool-call',
@@ -62,6 +79,7 @@ export const Channels = {
     COMPLETE: 'agent:complete',
     ERROR: 'agent:error',
     TODOS_UPDATE: 'agent:todos-update',
+    CONTEXT_USAGE: 'agent:context-usage',
     // Plan approval (P0-1.B)
     PLAN_APPROVAL_REQUEST: 'agent:plan-approval-request',
     MODE_CHANGE: 'agent:mode-change',

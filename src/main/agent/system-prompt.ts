@@ -164,6 +164,14 @@ ${ruleSummary}
 - 被拦截后应调整方案，不要重复尝试同类命令
 - 用户自定义规则可能额外拦截某些命令`);
 
+  // -- 5c. Tool result handling (P1-1) ------------------------------------
+  staticSections.push(`## 工具结果处理
+
+- 当工具返回包含 \`truncated: true\` 和 \`fullResultPath\` 字段时，完整结果已保存到文件
+- 如需查看完整输出，调用 \`read_tool_result\` 工具，传入 \`path\` 参数（即 fullResultPath）
+- 对于大日志输出，优先使用 \`tail_log\`（限制行数）而非直接 cat 整个文件
+- 截断的预览包含足够的上下文信息，仅在有明确需要时才读取完整结果`);
+
   // -- 5b. Memory (static, session-stable) ----------------------------------
   const memoryContent = buildMemoryPromptSection();
   if (memoryContent) {
@@ -183,20 +191,27 @@ ${memoryContent}`);
 ${autoMemory}`);
   }
 
-  // -- 6. Enabled Skills (static, session-stable) ---------------------------
+  // -- 6. Enabled Skills metadata (progressive disclosure) ------------------
+  // Only inject skill metadata (name + description + whenToUse) into the
+  // system prompt. Full skill content is loaded via /skillName invocation
+  // to keep the system prompt small (progressive disclosure).
   const enabledSkills = getEnabledSkills();
   if (enabledSkills.length > 0) {
     const skillList = enabledSkills
-      .map((s) => `- **${s.displayName}** (${s.name})：${s.description}`)
+      .map(
+        (s) =>
+          `- **${s.displayName}** (\`/${s.name}\`)：${s.description}${s.whenToUse ? ` - ${s.whenToUse}` : ''}`,
+      )
       .join('\n');
-    const skillFragments = enabledSkills.map((s) => s.promptFragment).join('\n\n---\n\n');
-    staticSections.push(`## 已启用技能（诊断能力包）
+    staticSections.push(`## 已启用技能（渐进式披露）
 
-以下技能已启用，当用户的请求匹配时请参考对应的诊断流程：
+以下技能已启用。系统提示仅包含技能元数据，完整诊断流程需通过 \`/技能名\` 调用后才会注入到对话中：
 
 ${skillList}
 
-${skillFragments}`);
+使用方法：在输入框中输入 \`/技能名 [参数]\` 即可调用对应技能的完整诊断流程。例如 \`/system-diagnosis\` 或 \`/nginx-diagnosis 检查 502 错误\`。
+
+**模型自动加载**：如果你判断某个已启用的技能与当前用户请求匹配，可以直接调用 \`get_skill_content\` 工具获取该技能的完整诊断流程，无需等待用户手动调用。`);
   }
 
   // -- 7. Operating guidelines (static, never changes) ----------------------
@@ -221,6 +236,7 @@ ${skillFragments}`);
 17. **sudo_exec 不加 sudo 前缀**：使用 sudo_exec 工具时，**不要**在命令前加 \`sudo\` 前缀。该工具会自动通过 \`sudo -S sh -c\` 包装命令。例如：正确用法是 \`apt update\`，而不是 \`sudo apt update\`。加 sudo 前缀会导致双重 sudo 认证失败
 18. **包安装超时**：\`apt update\`、\`apt install\` 等命令可能需要较长时间（>60秒）。对于长时间运行的命令，使用 \`timeout\` 包装并设置合理超时，例如 \`timeout 120 apt install -y nginx\`。避免直接执行可能导致 SSH 超时的长命令
 19. **主动提问**：当遇到以下情况时，使用 \`ask_user\` 工具向用户提问（每会话上限 5 次）：需求不明确无法确定执行路径；连续授权被拒不确定用户意图；需在多个修复方案中选择。不要用于简单确认（授权流程已处理）。每个问题提供 2-4 个选项，选项需明确互斥。用户可输入"Other"自定义回答
+20. **技能安装**：当用户要求安装或创建技能时，使用 \`install_skill\` 工具。技能是可复用的诊断流程包，安装后用户可通过 \`/技能名\` 调用。安装时需提供名称（kebab-case）、描述、完整内容（诊断步骤和命令），以及可选的触发场景说明
 
 ## 输出格式
 

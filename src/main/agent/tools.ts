@@ -3,10 +3,11 @@ import { tool } from 'ai';
 import { connectionPool, execCommand, sudoExecCommand, readFile, writeFile } from '../ssh/index.js';
 import { hostsStore } from '../storage/hosts.js';
 import { auditStore } from '../storage/audit.js';
+import { hooksStore } from '../storage/hooks.js';
 import { getEffectiveConfig, checkCommandSecurity, sanitizeCommand } from '../security/index.js';
 import { decideByMode } from '../security/modes.js';
 import { logger } from '../utils/logger.js';
-import type { SafetyMode, HostConfig, TodoItem } from '../../shared/types.js';
+import type { SafetyMode, HostConfig, TodoItem, Hook } from '../../shared/types.js';
 import type {
   SessionContext,
   ToolCallInfo,
@@ -17,6 +18,7 @@ import type {
 } from './types.js';
 import { createTodoWriteTool } from './tools/todo-write.js';
 import { createUpdateMemoryTool } from './tools/update-memory.js';
+import { installSkill, getSkillContent, listAllSkills } from './skills/index.js';
 import {
   createExitPlanModeTool,
   type ModeHolder,
@@ -24,6 +26,22 @@ import {
   type ModeChangeCallback,
 } from './tools/exit-plan-mode.js';
 import { createAskUserTool, type AskUserCallback } from './tools/ask-user.js';
+import {
+  executePreToolUseHooks,
+  executePostToolUseHooks,
+  defaultExecutor,
+} from './hooks/engine.js';
+import { createConcurrencyGuard, type ReleaseFunction } from './concurrency.js';
+import { shouldPersist, persistToolResult, readPersistedResult } from './tool-results.js';
+import {
+  buildTailLogCommand,
+  buildSearchLogsCommand,
+  buildJournalQueryCommand,
+  buildProcessListCommand,
+  buildServiceStatusCommand,
+  buildDiskAnalysisCommand,
+  buildNetworkConnectionsCommand,
+} from './ops-commands.js';
 
 // Tool factory — creates the tools object for a single agent loop invocation.
 // Tools close over the session context and streaming callbacks so they can:
@@ -62,6 +80,17 @@ export function createTools(deps: ToolFactoryDeps) {
     modeHolder,
   } = deps;
   const securityConfig = getEffectiveConfig(safetyMode);
+
+  // Load enabled hooks once per agent loop invocation. Hooks are evaluated
+  // fresh each time tools are created, so config changes take effect on the
+  // next user message without restarting the session.
+  const enabledHooks: Hook[] = hooksStore.listEnabled();
+
+  // Concurrency guard (P1-1): READ tools share a counting semaphore (max 5),
+  // WRITE/SUDO tools use a per-host mutex. Guards are acquired inside each
+  // tool's execute() after preExec (security/auth), so we don't hold the
+  // lock while waiting for user authorization.
+  const guard = createConcurrencyGuard(5);
 
   // TodoWrite tool (P0-1): task list management, closured over sessionId
   const todoWriteTool = createTodoWriteTool(context.sessionId, onTodosUpdate);
@@ -119,6 +148,7 @@ export function createTools(deps: ToolFactoryDeps) {
     commandType: 'READ' | 'WRITE' | 'SUDO' | 'BLOCKED';
     authorization: 'auto' | 'approved' | 'rejected' | 'blocked';
     backup?: boolean;
+    modifiedCommand?: string;
   }> {
     // 1. Security rule check (always applies, all modes)
     const secResult = checkCommandSecurity(command, host.id, securityConfig);
@@ -150,7 +180,53 @@ export function createTools(deps: ToolFactoryDeps) {
 
     const commandType = secResult.commandType;
 
-    // 2. Mode decision - reads from modeHolder so ExitPlanMode can switch
+    // 2. PreToolUse hooks - run between security check and mode decision.
+    //    deny  -> block the tool call
+    //    allow -> skip user authorization (mode decision still applies)
+    //    pass  -> continue normal flow
+    //    modifyInput -> replace command
+    const hookInput: Record<string, unknown> = { command, description, host: host.name };
+    const hookResult = await executePreToolUseHooks(
+      toolName,
+      hookInput,
+      enabledHooks,
+      defaultExecutor,
+    );
+
+    if (hookResult.decision === 'deny') {
+      const blockMsg = hookResult.blockMessage ?? 'Blocked by hook';
+      onToolCall({
+        toolCallId,
+        toolName,
+        hostId: host.id,
+        hostName: host.name,
+        command,
+        description,
+        commandType: 'BLOCKED',
+        needsApproval: false,
+      });
+      onToolResult({
+        toolCallId,
+        toolName,
+        success: false,
+        blockedReason: blockMsg,
+        authorization: 'blocked',
+      });
+      return {
+        proceed: false,
+        reason: blockMsg,
+        commandType: 'BLOCKED',
+        authorization: 'blocked',
+      };
+    }
+
+    const skipAuthorization = hookResult.decision === 'allow';
+    const modifiedCommand =
+      typeof hookResult.modifiedInput?.command === 'string'
+        ? (hookResult.modifiedInput.command as string)
+        : undefined;
+
+    // 3. Mode decision - reads from modeHolder so ExitPlanMode can switch
     //    mode mid-loop (plan -> operator) without recreating tools.
     const decision = decideByMode(modeHolder.mode, commandType);
     if (!decision.allowed) {
@@ -174,8 +250,8 @@ export function createTools(deps: ToolFactoryDeps) {
       return { proceed: false, reason: decision.reason, commandType, authorization: 'blocked' };
     }
 
-    // 3. Authorization (if needed)
-    if (decision.needsApproval) {
+    // 4. Authorization (if needed) - skipped when a PreToolUse hook said allow
+    if (decision.needsApproval && !skipAuthorization) {
       onToolCall({
         toolCallId,
         toolName,
@@ -213,13 +289,20 @@ export function createTools(deps: ToolFactoryDeps) {
           authorization: 'rejected',
         };
       }
-      return { proceed: true, commandType, authorization: 'approved', backup: response.backup };
+      return {
+        proceed: true,
+        commandType,
+        authorization: 'approved',
+        backup: response.backup,
+        modifiedCommand,
+      };
     }
 
     // Auto-approved (READ in any mode, or anything in autopilot).
     // In autopilot mode, WRITE/SUDO commands are auto-approved — if the AI
     // provided backup_paths, set backup: true so backups are still created.
     // Without this, autopilot mode would skip backups even when requested.
+    // Also reached when a PreToolUse hook said "allow" (skipAuthorization).
     onToolCall({
       toolCallId,
       toolName,
@@ -230,7 +313,13 @@ export function createTools(deps: ToolFactoryDeps) {
       commandType,
       needsApproval: false,
     });
-    return { proceed: true, commandType, authorization: 'auto', backup: !!backupPaths };
+    return {
+      proceed: true,
+      commandType,
+      authorization: 'auto',
+      backup: !!backupPaths,
+      modifiedCommand,
+    };
   }
 
   // ── Audit logging helper ────────────────────────────────────────────────
@@ -252,6 +341,119 @@ export function createTools(deps: ToolFactoryDeps) {
       });
     } catch (err) {
       logger.error('Failed to write audit log:', err);
+    }
+  }
+
+  // ── READ-only tool executor helper (#13) ────────────────────────────────
+  // Executes a pre-built safe command via SSH. All ops tools use this since
+  // they are READ-only - no authorization needed, just audit + stream result.
+  async function execReadTool(
+    hostName: string | undefined,
+    toolName: string,
+    command: string,
+    description: string,
+  ) {
+    const toolCallId = `${toolName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const { host } = resolveHost(hostName);
+
+    onToolCall({
+      toolCallId,
+      toolName,
+      hostId: host.id,
+      hostName: host.name,
+      command,
+      description,
+      commandType: 'READ',
+      needsApproval: false,
+    });
+
+    const release = await guard.acquireRead();
+    try {
+      const manager = await connectionPool.get(host.id);
+      const result = await execCommand(manager, command);
+      const success = result.exitCode === 0;
+
+      // PostToolUse hooks (P1-3 fix: was missing for execReadTool)
+      const postResult = await executePostToolUseHooks(
+        toolName,
+        { command },
+        { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode },
+        enabledHooks,
+        defaultExecutor,
+      );
+      const effectiveStdout = postResult.additionalContext
+        ? `${result.stdout}\n\n[Hook Context]\n${postResult.additionalContext}`
+        : result.stdout;
+
+      onToolResult({
+        toolCallId,
+        toolName,
+        success,
+        stdout: effectiveStdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        authorization: 'auto',
+      });
+
+      recordAudit({
+        sessionId: context.sessionId,
+        hostId: host.id,
+        hostName: host.name,
+        hostIp: host.host,
+        toolName,
+        command,
+        description,
+        commandType: 'READ',
+        authorization: 'auto',
+        exitCode: result.exitCode ?? undefined,
+        durationMs: result.durationMs,
+        outputSummary: truncateOutput(result.stdout || result.stderr),
+      });
+
+      // Large result persistence (P1-1)
+      if (shouldPersist(result.stdout, result.stderr)) {
+        return persistToolResult(context.sessionId, toolCallId, {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          command,
+          hostName: host.name,
+          toolName,
+        });
+      }
+
+      return {
+        stdout: effectiveStdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+      };
+    } catch (err) {
+      const errMsg = formatSshError(err as Error, host.name);
+      onToolResult({
+        toolCallId,
+        toolName,
+        success: false,
+        stderr: errMsg,
+        authorization: 'auto',
+      });
+      recordAudit({
+        sessionId: context.sessionId,
+        hostId: host.id,
+        hostName: host.name,
+        hostIp: host.host,
+        toolName,
+        command,
+        description,
+        commandType: 'READ',
+        authorization: 'auto',
+        exitCode: -1,
+        blockedReason: errMsg,
+      });
+      return { error: errMsg };
+    } finally {
+      release();
     }
   }
 
@@ -299,6 +501,15 @@ export function createTools(deps: ToolFactoryDeps) {
           return { error: pre.reason, blocked: true };
         }
 
+        const effectiveCommand = pre.modifiedCommand ?? sanitized;
+
+        // P1-1: Concurrency guard - READ shares a semaphore, WRITE/SUDO
+        // uses a per-host mutex to serialize mutations.
+        const release: ReleaseFunction =
+          pre.commandType === 'READ'
+            ? await guard.acquireRead()
+            : await guard.acquireWrite(host.id);
+
         try {
           const manager = await connectionPool.get(host.id);
 
@@ -330,7 +541,7 @@ export function createTools(deps: ToolFactoryDeps) {
           // to the existing card's output instead of replacing.
           const result = await withRetry(
             () =>
-              execCommand(manager, sanitized, (chunk) => {
+              execCommand(manager, effectiveCommand, (chunk) => {
                 hasStreamedOutput = true;
                 onToolResult({
                   toolCallId,
@@ -346,11 +557,23 @@ export function createTools(deps: ToolFactoryDeps) {
           );
           const success = result.exitCode === 0;
 
+          // PostToolUse hooks - append additionalContext to stdout
+          const postResult = await executePostToolUseHooks(
+            'exec',
+            { command: effectiveCommand },
+            { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode },
+            enabledHooks,
+            defaultExecutor,
+          );
+          const effectiveStdout = postResult.additionalContext
+            ? `${result.stdout}\n\n[Hook Context]\n${postResult.additionalContext}`
+            : result.stdout;
+
           onToolResult({
             toolCallId,
             toolName: 'exec',
             success,
-            stdout: result.stdout,
+            stdout: effectiveStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -363,7 +586,7 @@ export function createTools(deps: ToolFactoryDeps) {
             hostName: host.name,
             hostIp: host.host,
             toolName: 'exec',
-            command: sanitized,
+            command: effectiveCommand,
             description,
             commandType: pre.commandType,
             authorization: pre.authorization,
@@ -372,8 +595,20 @@ export function createTools(deps: ToolFactoryDeps) {
             outputSummary: truncateOutput(result.stdout || result.stderr),
           });
 
+          // P1-1: Large result persistence
+          if (shouldPersist(result.stdout, result.stderr)) {
+            return persistToolResult(context.sessionId, toolCallId, {
+              stdout: result.stdout,
+              stderr: result.stderr,
+              exitCode: result.exitCode,
+              command: effectiveCommand,
+              hostName: host.name,
+              toolName: 'exec',
+            });
+          }
+
           return {
-            stdout: result.stdout,
+            stdout: effectiveStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -408,6 +643,8 @@ export function createTools(deps: ToolFactoryDeps) {
             blockedReason: errMsg,
           });
           return { error: errMsg, blocked: false };
+        } finally {
+          release();
         }
       },
     }),
@@ -455,6 +692,15 @@ export function createTools(deps: ToolFactoryDeps) {
           return { error: pre.reason, blocked: true };
         }
 
+        const effectiveCommand = pre.modifiedCommand ?? sanitized;
+
+        // P1-1: Concurrency guard - READ shares a semaphore, WRITE/SUDO
+        // uses a per-host mutex to serialize mutations.
+        const release: ReleaseFunction =
+          pre.commandType === 'READ'
+            ? await guard.acquireRead()
+            : await guard.acquireWrite(host.id);
+
         try {
           const manager = await connectionPool.get(host.id);
 
@@ -480,7 +726,7 @@ export function createTools(deps: ToolFactoryDeps) {
           let hasStreamedOutput = false;
           const result = await withRetry(
             () =>
-              sudoExecCommand(manager, sanitized, (chunk) => {
+              sudoExecCommand(manager, effectiveCommand, (chunk) => {
                 hasStreamedOutput = true;
                 onToolResult({
                   toolCallId,
@@ -496,11 +742,23 @@ export function createTools(deps: ToolFactoryDeps) {
           );
           const success = result.exitCode === 0;
 
+          // PostToolUse hooks - append additionalContext to stdout
+          const postResult = await executePostToolUseHooks(
+            'sudo_exec',
+            { command: effectiveCommand },
+            { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode },
+            enabledHooks,
+            defaultExecutor,
+          );
+          const effectiveStdout = postResult.additionalContext
+            ? `${result.stdout}\n\n[Hook Context]\n${postResult.additionalContext}`
+            : result.stdout;
+
           onToolResult({
             toolCallId,
             toolName: 'sudo_exec',
             success,
-            stdout: result.stdout,
+            stdout: effectiveStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -513,7 +771,7 @@ export function createTools(deps: ToolFactoryDeps) {
             hostName: host.name,
             hostIp: host.host,
             toolName: 'sudo_exec',
-            command: sanitized,
+            command: effectiveCommand,
             description,
             commandType: 'SUDO',
             authorization: pre.authorization,
@@ -522,8 +780,20 @@ export function createTools(deps: ToolFactoryDeps) {
             outputSummary: truncateOutput(result.stdout || result.stderr),
           });
 
+          // P1-1: Large result persistence
+          if (shouldPersist(result.stdout, result.stderr)) {
+            return persistToolResult(context.sessionId, toolCallId, {
+              stdout: result.stdout,
+              stderr: result.stderr,
+              exitCode: result.exitCode,
+              command: effectiveCommand,
+              hostName: host.name,
+              toolName: 'sudo_exec',
+            });
+          }
+
           return {
-            stdout: result.stdout,
+            stdout: effectiveStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -558,6 +828,8 @@ export function createTools(deps: ToolFactoryDeps) {
             blockedReason: errMsg,
           });
           return { error: errMsg, blocked: false };
+        } finally {
+          release();
         }
       },
     }),
@@ -587,6 +859,7 @@ export function createTools(deps: ToolFactoryDeps) {
           needsApproval: false,
         });
 
+        const release = await guard.acquireRead();
         try {
           const manager = await connectionPool.get(host.id);
           const result = await readFile(manager, path, { offset, limit });
@@ -625,6 +898,8 @@ export function createTools(deps: ToolFactoryDeps) {
             authorization: 'auto',
           });
           return { error: (err as Error).message };
+        } finally {
+          release();
         }
       },
     }),
@@ -668,6 +943,7 @@ export function createTools(deps: ToolFactoryDeps) {
           return { error: pre.reason, blocked: true };
         }
 
+        const release = await guard.acquireWrite(host.id);
         try {
           const manager = await connectionPool.get(host.id);
 
@@ -691,13 +967,27 @@ export function createTools(deps: ToolFactoryDeps) {
           }
 
           const result = await writeFile(manager, path, content);
+
+          // PostToolUse hooks - append additionalContext to stdout
+          const postResult = await executePostToolUseHooks(
+            'write_file',
+            { path },
+            { stdout: `Wrote ${result.bytesWritten} bytes to ${path}`, exitCode: 0 },
+            enabledHooks,
+            defaultExecutor,
+          );
+          const writeMsg = backupPath
+            ? `Wrote ${result.bytesWritten} bytes to ${path} (backup: ${backupPath})`
+            : `Wrote ${result.bytesWritten} bytes to ${path}`;
+          const effectiveStdout = postResult.additionalContext
+            ? `${writeMsg}\n\n[Hook Context]\n${postResult.additionalContext}`
+            : writeMsg;
+
           onToolResult({
             toolCallId,
             toolName: 'write_file',
             success: true,
-            stdout: backupPath
-              ? `Wrote ${result.bytesWritten} bytes to ${path} (backup: ${backupPath})`
-              : `Wrote ${result.bytesWritten} bytes to ${path}`,
+            stdout: effectiveStdout,
             authorization: pre.authorization,
           });
           recordAudit({
@@ -725,6 +1015,8 @@ export function createTools(deps: ToolFactoryDeps) {
             authorization: pre.authorization,
           });
           return { error: (err as Error).message };
+        } finally {
+          release();
         }
       },
     }),
@@ -788,6 +1080,7 @@ export function createTools(deps: ToolFactoryDeps) {
           return { error: pre.reason, blocked: true };
         }
 
+        const release = await guard.acquireWrite(host.id);
         try {
           const manager = await connectionPool.get(host.id);
           // Find the most recent backup file for this path.
@@ -868,7 +1161,234 @@ export function createTools(deps: ToolFactoryDeps) {
             blockedReason: errMsg,
           });
           return { error: errMsg };
+        } finally {
+          release();
         }
+      },
+    }),
+
+    // ── Structured ops tools (#13) ──────────────────────────────────────────
+    // All 7 tools are READ-only - they execute pre-built safe commands via SSH
+    // and return structured output. No authorization needed (READ in all modes).
+    tail_log: tool({
+      description: 'Read the last N lines of a log file on a remote host.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        path: z.string().describe('Remote file path to read'),
+        lines: z.number().optional().describe('Number of lines to read (default 200)'),
+        follow: z.boolean().optional().describe('Follow the file (tail -f)'),
+      }),
+      execute: async ({ host: hostName, path, lines, follow }) => {
+        return execReadTool(
+          hostName,
+          'tail_log',
+          buildTailLogCommand(path, lines, follow),
+          `tail ${path}`,
+        );
+      },
+    }),
+
+    search_logs: tool({
+      description: 'Search for a pattern across log files with context lines.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        pattern: z.string().describe('Search pattern (regex)'),
+        paths: z.array(z.string()).describe('Log file paths to search'),
+        contextLines: z.number().optional().describe('Lines of context around matches (default 0)'),
+        caseInsensitive: z.boolean().optional().describe('Case-insensitive search'),
+        maxResults: z.number().optional().describe('Max results to return'),
+      }),
+      execute: async ({
+        host: hostName,
+        pattern,
+        paths,
+        contextLines,
+        caseInsensitive,
+        maxResults,
+      }) => {
+        return execReadTool(
+          hostName,
+          'search_logs',
+          buildSearchLogsCommand(pattern, paths, { contextLines, caseInsensitive, maxResults }),
+          `search "${pattern}" in ${paths.length} files`,
+        );
+      },
+    }),
+
+    journal_query: tool({
+      description: 'Query the systemd journal on a remote host.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        unit: z.string().optional().describe('Systemd unit name (e.g. nginx, sshd)'),
+        priority: z
+          .string()
+          .optional()
+          .describe('Priority filter: emerg, alert, crit, err, warning, notice, info, debug'),
+        since: z
+          .string()
+          .optional()
+          .describe('Show entries since this time (e.g. "1 hour ago", "2024-01-01")'),
+        until: z.string().optional().describe('Show entries until this time'),
+        lines: z.number().optional().describe('Max lines to return (default 100)'),
+      }),
+      execute: async ({ host: hostName, unit, priority, since, until, lines }) => {
+        return execReadTool(
+          hostName,
+          'journal_query',
+          buildJournalQueryCommand({ unit, priority, since, until, lines }),
+          `journalctl ${unit ?? 'all'}`,
+        );
+      },
+    }),
+
+    process_list: tool({
+      description: 'List processes on a remote host with sorting and filtering.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        sortBy: z
+          .enum(['cpu', 'mem', 'pid'])
+          .optional()
+          .describe('Sort by: cpu, mem, or pid (default cpu)'),
+        filter: z.string().optional().describe('Filter processes by name pattern'),
+        top: z.number().optional().describe('Show top N processes (default 20)'),
+      }),
+      execute: async ({ host: hostName, sortBy, filter, top }) => {
+        return execReadTool(
+          hostName,
+          'process_list',
+          buildProcessListCommand({ sortBy, filter, top }),
+          'ps aux sorted',
+        );
+      },
+    }),
+
+    service_status: tool({
+      description: 'Check systemd service status on a remote host.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        unit: z
+          .string()
+          .optional()
+          .describe('Service unit name (e.g. nginx). If omitted, lists all failed services.'),
+      }),
+      execute: async ({ host: hostName, unit }) => {
+        return execReadTool(
+          hostName,
+          'service_status',
+          buildServiceStatusCommand(unit),
+          `systemctl status ${unit ?? 'failed'}`,
+        );
+      },
+    }),
+
+    disk_analysis: tool({
+      description: 'Analyze disk usage on a remote host with depth control.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        path: z.string().optional().describe('Path to analyze (default /)'),
+        depth: z.number().optional().describe('Max depth of subdirectories (default 1)'),
+        top: z.number().optional().describe('Show top N entries (default 20)'),
+      }),
+      execute: async ({ host: hostName, path, depth, top }) => {
+        return execReadTool(
+          hostName,
+          'disk_analysis',
+          buildDiskAnalysisCommand(path, depth, top),
+          `du ${path ?? '/'}`,
+        );
+      },
+    }),
+
+    network_connections: tool({
+      description: 'List active network connections on a remote host.',
+      parameters: z.object({
+        host: z.string().optional().describe('Target host name'),
+        port: z.number().optional().describe('Filter by port number'),
+        state: z
+          .string()
+          .optional()
+          .describe('Filter by connection state (e.g. LISTEN, ESTABLISHED)'),
+      }),
+      execute: async ({ host: hostName, port, state }) => {
+        return execReadTool(
+          hostName,
+          'network_connections',
+          buildNetworkConnectionsCommand({ port, state }),
+          'ss -tunap',
+        );
+      },
+    }),
+
+    read_tool_result: tool({
+      description:
+        'Read the full content of a previously persisted tool result. ' +
+        'Use when a tool returned a truncated preview with fullResultPath.',
+      parameters: z.object({
+        path: z.string().describe('The fullResultPath returned by the previous tool call'),
+      }),
+      execute: async ({ path }) => {
+        try {
+          const data = readPersistedResult(path);
+          return {
+            stdout: data.stdout,
+            stderr: data.stderr,
+            exitCode: data.exitCode,
+            command: data.command,
+            hostName: data.hostName,
+            toolName: data.toolName,
+            timestamp: data.timestamp,
+          };
+        } catch (err) {
+          return { error: `Failed to read persisted result: ${(err as Error).message}` };
+        }
+      },
+    }),
+
+    get_skill_content: tool({
+      description:
+        "Get the full content of a skill by name. Skills are listed in the system prompt metadata. Use this to load the complete diagnostic procedure when the user's request matches a skill but they haven't explicitly invoked it via /skillName.",
+      parameters: z.object({
+        name: z.string().describe('The skill name (e.g., "nginx-diagnosis", "system-diagnosis")'),
+      }),
+      execute: async ({ name }) => {
+        const content = getSkillContent(name);
+        if (!content) {
+          const available = listAllSkills()
+            .map((s) => s.name)
+            .join(', ');
+          return {
+            error: `技能 '${name}' 不存在。可用技能: ${available}`,
+          };
+        }
+        return { name, content };
+      },
+    }),
+
+    install_skill: tool({
+      description:
+        'Install a new skill from user request. Creates a SKILL.md file that can be invoked via /skillName. Use when the user asks to install or create a skill.',
+      parameters: z.object({
+        name: z
+          .string()
+          .describe('Skill name in kebab-case (e.g., "redis-diagnosis", "nginx-troubleshoot")'),
+        description: z.string().describe('Short description of what this skill covers'),
+        content: z
+          .string()
+          .describe('The full markdown content of the skill - diagnostic steps, commands, etc.'),
+        whenToUse: z
+          .string()
+          .optional()
+          .describe('When this skill should be used (e.g., "当用户报告 Redis 相关问题时")'),
+      }),
+      execute: async ({ name, description, content, whenToUse }) => {
+        const result = installSkill(name, content, description, whenToUse);
+        if (!result.ok) {
+          return { error: result.error };
+        }
+        return {
+          success: true,
+          message: `技能 '${name}' 已安装成功。用户可以通过 /${name} 调用该技能。`,
+        };
       },
     }),
 

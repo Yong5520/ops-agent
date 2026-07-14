@@ -9,6 +9,7 @@ interface ModelRow {
   endpoint: string;
   api_key: string;
   model_name: string;
+  context_window: number | null;
   is_active: number;
   created_at: string;
   updated_at: string;
@@ -22,6 +23,7 @@ function rowToProvider(row: ModelRow, includeSecret = false): ModelProvider {
     endpoint: row.endpoint,
     apiKey: includeSecret ? decrypt(row.api_key) : undefined,
     modelName: row.model_name,
+    contextWindow: row.context_window ?? undefined,
     isActive: row.is_active === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -38,13 +40,15 @@ export const modelsStore = {
 
   get(id: string): ModelProvider | null {
     const row = getDb().prepare('SELECT * FROM model_providers WHERE id = ?').get(id) as
-      ModelRow | undefined;
+      | ModelRow
+      | undefined;
     return row ? rowToProvider(row) : null;
   },
 
   getWithSecret(id: string): ModelProvider | null {
     const row = getDb().prepare('SELECT * FROM model_providers WHERE id = ?').get(id) as
-      ModelRow | undefined;
+      | ModelRow
+      | undefined;
     return row ? rowToProvider(row, true) : null;
   },
 
@@ -61,8 +65,8 @@ export const modelsStore = {
     }
     const db = getDb();
     const stmt = db.prepare(`
-      INSERT INTO model_providers (name, type, endpoint, api_key, model_name)
-      VALUES (@name, @type, @endpoint, @apiKey, @modelName)
+      INSERT INTO model_providers (name, type, endpoint, api_key, model_name, context_window)
+      VALUES (@name, @type, @endpoint, @apiKey, @modelName, @contextWindow)
       RETURNING *
     `);
     const row = stmt.get({
@@ -71,6 +75,7 @@ export const modelsStore = {
       endpoint: payload.endpoint,
       apiKey: encrypt(payload.apiKey),
       modelName: payload.modelName,
+      contextWindow: payload.contextWindow ?? null,
     }) as ModelRow;
     return rowToProvider(row);
   },
@@ -94,7 +99,7 @@ export const modelsStore = {
       `
       UPDATE model_providers
       SET name = @name, type = @type, endpoint = @endpoint, api_key = @apiKey,
-          model_name = @modelName, updated_at = datetime('now')
+          model_name = @modelName, context_window = @contextWindow, updated_at = datetime('now')
       WHERE id = @id
     `,
     ).run({
@@ -104,6 +109,7 @@ export const modelsStore = {
       endpoint: payload.endpoint ?? existing.endpoint,
       apiKey: apiKeyStored,
       modelName: payload.modelName ?? existing.modelName,
+      contextWindow: payload.contextWindow ?? existing.contextWindow ?? null,
     });
     return this.get(id)!;
   },

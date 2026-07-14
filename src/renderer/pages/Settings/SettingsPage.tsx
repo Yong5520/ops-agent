@@ -2,15 +2,19 @@ import { useState } from 'react';
 import { ModelConfigSection } from './ModelConfigSection.js';
 import { HostConfigSection } from './HostConfigSection.js';
 import { SafetyModeSection } from './SafetyModeSection.js';
+import { HooksSection } from './HooksSection.js';
+import { SkillsSection } from './SkillsSection.js';
 import { useSessionStore } from '../../store/sessionStore.js';
 import type { SafetyMode } from '../../../shared/types.js';
 
-type Tab = 'models' | 'hosts' | 'safety';
+type Tab = 'models' | 'hosts' | 'safety' | 'hooks' | 'skills';
 
 const TABS: Array<{ value: Tab; label: string }> = [
   { value: 'models', label: '模型' },
   { value: 'hosts', label: '主机' },
   { value: 'safety', label: '安全' },
+  { value: 'hooks', label: 'Hooks' },
+  { value: 'skills', label: '技能' },
 ];
 
 export function SettingsPage() {
@@ -21,7 +25,7 @@ export function SettingsPage() {
     <div className="flex flex-1 flex-col">
       <header className="border-b border-zinc-800 px-6 py-3">
         <h1 className="text-lg font-semibold">设置</h1>
-        <p className="text-xs text-zinc-500">模型供应商 / 目标主机 / 安全模式</p>
+        <p className="text-xs text-zinc-500">模型供应商 / 目标主机 / 安全模式 / Hooks / 技能</p>
       </header>
 
       {/* Tab navigation */}
@@ -52,6 +56,8 @@ export function SettingsPage() {
               onModeChange={(mode: SafetyMode) => setSafetyMode(mode)}
             />
           )}
+          {tab === 'hooks' && <HooksSection />}
+          {tab === 'skills' && <SkillsSection />}
         </div>
       </div>
     </div>

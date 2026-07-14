@@ -43,6 +43,8 @@ interface AgentStore {
   pendingAuths: PendingAuthorization[];
   // Error message if the loop failed
   error: string | null;
+  // Context usage from the last API finish event
+  contextUsage: { usedTokens: number; totalTokens: number; percentage: number } | null;
 
   // Actions
   startRun: (params: {
@@ -95,6 +97,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   toolCards: [],
   pendingAuths: [],
   error: null,
+  contextUsage: null,
 
   startRun: async (params) => {
     set({ isRunning: true, streamingText: '', toolCards: [], error: null });
@@ -233,6 +236,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }),
     );
 
+    unsubscribers.push(
+      window.opsAgent.agent.onContextUsage((event) => {
+        if (event.sessionId !== params.sessionId) return;
+        set({
+          contextUsage: {
+            usedTokens: event.usedTokens,
+            totalTokens: event.totalTokens,
+            percentage: event.percentage,
+          },
+        });
+      }),
+    );
+
     // Initiate the run
     try {
       await window.opsAgent.agent.run({
@@ -304,7 +320,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // Set isRunning: false FIRST, before unsubscribing IPC listeners.
     // If any unsub() throws, isRunning is still correctly reset so the
     // chat input's `disabled` prop flips back to false immediately.
-    set({ isRunning: false, streamingText: '', toolCards: [], pendingAuths: [], error: null });
+    set({
+      isRunning: false,
+      streamingText: '',
+      toolCards: [],
+      pendingAuths: [],
+      error: null,
+      contextUsage: null,
+    });
     for (const unsub of unsubscribers) unsub();
     unsubscribers = [];
   },

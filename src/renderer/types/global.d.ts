@@ -19,6 +19,8 @@ import type {
   CustomRuleInput,
   SafetyMode,
   TodoItem,
+  Hook,
+  HookCreateInput,
 } from '../shared/types.js';
 
 interface AgentRunRequest {
@@ -143,6 +145,59 @@ interface AgentAskUserResponse {
   dismissed?: boolean;
 }
 
+interface AgentContextUsageEvent {
+  sessionId: string;
+  usedTokens: number;
+  totalTokens: number;
+  percentage: number;
+}
+
+interface AgentCompactResult {
+  ok: boolean;
+  reason?: 'too_few_messages' | 'no_model';
+  messageCount?: number;
+  compressedCount?: number;
+  summary?: string;
+}
+
+interface QuickCommandResult {
+  ok: boolean;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  error?: string;
+  hostName?: string;
+  command?: string;
+}
+
+interface ContextBreakdownCategory {
+  name: string;
+  tokens: number;
+  percentage: number;
+}
+
+interface ContextBreakdownSection {
+  name: string;
+  tokens: number;
+}
+
+interface ContextBreakdown {
+  model: string;
+  contextWindow: number;
+  totalUsed: number;
+  percentage: number;
+  categories: ContextBreakdownCategory[];
+  systemPromptSections: ContextBreakdownSection[];
+  tools: ContextBreakdownSection[];
+  skills: Array<{ name: string; tokens: number; enabled: boolean }>;
+  messageBreakdown: {
+    userMessages: number;
+    assistantMessages: number;
+    systemMessages: number;
+    totalTokens: number;
+  };
+}
+
 interface SftpDirEntry {
   name: string;
   longname: string;
@@ -159,6 +214,17 @@ interface SftpProgressEvent {
   transferred: number;
   total: number;
   transferId?: string;
+}
+
+interface SkillInfo {
+  name: string;
+  displayName: string;
+  description: string;
+  whenToUse?: string;
+  source: 'builtin' | 'user';
+  enabled: boolean;
+  enabledByDefault: boolean;
+  filePath?: string;
 }
 
 interface OpsAgentApi {
@@ -209,6 +275,7 @@ interface OpsAgentApi {
   audit: {
     list: (filter: AuditFilter) => Promise<AuditLog[]>;
     create: (payload: AuditLogInput) => Promise<AuditLog>;
+    verifyIntegrity: () => Promise<string[]>;
   };
   settings: {
     get: (key: string) => Promise<string | null>;
@@ -221,9 +288,34 @@ interface OpsAgentApi {
     update: (id: string, payload: Partial<CustomRuleInput>) => Promise<CustomRule>;
     remove: (id: string) => Promise<void>;
   };
+  hooks: {
+    list: () => Promise<Hook[]>;
+    create: (payload: HookCreateInput) => Promise<Hook>;
+    update: (id: string, payload: Partial<HookCreateInput>) => Promise<Hook>;
+    remove: (id: string) => Promise<void>;
+  };
+  skills: {
+    list: () => Promise<SkillInfo[]>;
+    getContent: (name: string) => Promise<string | null>;
+    install: (
+      name: string,
+      content: string,
+      description?: string,
+      whenToUse?: string,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    remove: (name: string) => Promise<{ ok: boolean; error?: string }>;
+    toggle: (name: string, enabled: boolean) => Promise<void>;
+  };
   agent: {
     run: (request: AgentRunRequest) => Promise<void>;
     cancel: (sessionId: string) => Promise<void>;
+    compact: (sessionId: string, instructions?: string) => Promise<AgentCompactResult>;
+    getContext: (sessionId: string) => Promise<ContextBreakdown>;
+    quickCommand: (
+      sessionId: string,
+      command: string,
+      hostName?: string,
+    ) => Promise<QuickCommandResult>;
     respondAuthorization: (response: AgentAuthorizationResponse) => Promise<void>;
     respondPlanApproval: (response: AgentPlanApprovalResponse) => Promise<void>;
     respondAskUser: (response: AgentAskUserResponse) => Promise<void>;
@@ -237,6 +329,7 @@ interface OpsAgentApi {
     onPlanApprovalRequest: (handler: (event: AgentPlanApprovalRequestEvent) => void) => () => void;
     onModeChange: (handler: (event: AgentModeChangeEvent) => void) => () => void;
     onAskUserRequest: (handler: (event: AgentAskUserRequestEvent) => void) => () => void;
+    onContextUsage: (handler: (event: AgentContextUsageEvent) => void) => () => void;
   };
   tasks: {
     list: (sessionId: string) => Promise<TodoItem[]>;

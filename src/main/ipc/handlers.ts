@@ -7,11 +7,23 @@ import { sessionsStore } from '../storage/sessions.js';
 import { auditStore } from '../storage/audit.js';
 import { settingsStore } from '../storage/settings.js';
 import { customRulesStore } from '../storage/custom-rules.js';
+import { hooksStore } from '../storage/hooks.js';
 import { taskListsStore } from '../storage/task-lists.js';
 import { runAgentLoop } from '../agent/loop.js';
 import { exportSessionToMarkdown } from '../agent/export.js';
-import { clearSummaryCache } from '../agent/context.js';
-import { connectionPool } from '../ssh/index.js';
+import { clearSummaryCache, compressContext, loadMessages } from '../agent/context.js';
+import { cleanupSessionResults } from '../agent/tool-results.js';
+import { analyzeContextBreakdown } from '../agent/context-breakdown.js';
+import {
+  listAllSkills,
+  getEnabledSkills,
+  getSkillContent,
+  installSkill,
+  deleteSkill,
+  setSkillEnabled,
+} from '../agent/skills/index.js';
+import { getActiveModel } from '../agent/providers.js';
+import { connectionPool, execCommand } from '../ssh/index.js';
 import { registerTerminalHandlers, closeAllTerminals } from './terminal.js';
 import type { AuthorizationResponse } from '../agent/types.js';
 import type {
@@ -116,6 +128,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     // session don't linger. (Resolves the MEDIUM known issue from code
     // review: summaryCache was never cleared on session deletion.)
     clearSummaryCache(id);
+    cleanupSessionResults(id);
     return sessionsStore.deleteSession(id);
   });
   ipcMain.handle(Channels.Sessions.MESSAGES, async (_e, sessionId: string) =>
@@ -136,6 +149,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   // ---------- Audit ----------
   ipcMain.handle(Channels.Audit.LIST, async (_e, filter) => auditStore.list(filter));
   ipcMain.handle(Channels.Audit.CREATE, async (_e, payload) => auditStore.create(payload));
+  ipcMain.handle(Channels.Audit.VERIFY, async () => auditStore.verifyIntegrity());
 
   // ---------- Settings ----------
   ipcMain.handle(Channels.Settings.GET, async (_e, key: string) => settingsStore.get(key));
@@ -151,6 +165,14 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     customRulesStore.update(id, payload),
   );
   ipcMain.handle(Channels.Rules.DELETE, async (_e, id: string) => customRulesStore.delete(id));
+
+  // ---------- Hooks ----------
+  ipcMain.handle(Channels.Hooks.LIST, async () => hooksStore.list());
+  ipcMain.handle(Channels.Hooks.CREATE, async (_e, payload) => hooksStore.create(payload));
+  ipcMain.handle(Channels.Hooks.UPDATE, async (_e, id: string, payload) =>
+    hooksStore.update(id, payload),
+  );
+  ipcMain.handle(Channels.Hooks.DELETE, async (_e, id: string) => hooksStore.delete(id));
 
   // ---------- Agent ----------
   ipcMain.handle(Channels.Agent.RUN, async (_e, request: AgentRunRequest) => {
@@ -234,6 +256,9 @@ export function registerIpcHandlers(win: BrowserWindow): void {
           sessionId: request.sessionId,
           todos,
         });
+      },
+      onContextUsage: (event) => {
+        win.webContents.send(Channels.Agent.CONTEXT_USAGE, event);
       },
       onPlanApproval: (plan) => {
         // Send plan to renderer for user approval, wait for response
@@ -370,6 +395,126 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     } else {
       logger.warn(`[Agent] Ask-user response for unknown session: ${response.sessionId}`);
     }
+  });
+
+  // ---------- Context: Manual Compact ----------
+  ipcMain.handle(Channels.Agent.COMPACT, async (_e, sessionId: string, _instructions?: string) => {
+    const messages = loadMessages(sessionId);
+    if (messages.length < 5) {
+      return {
+        ok: false,
+        reason: 'too_few_messages',
+        messageCount: messages.length,
+      };
+    }
+    const model = getActiveModel();
+    if (!model) {
+      return { ok: false, reason: 'no_model' };
+    }
+    const compressed = await compressContext(messages, {
+      sessionId,
+      model,
+      force: true,
+    });
+    // Return summary info so the renderer can show a system message.
+    const summaryMsg = compressed.find(
+      (m) =>
+        m.role === 'system' && typeof m.content === 'string' && m.content.includes('上下文摘要'),
+    );
+    const summaryText = typeof summaryMsg?.content === 'string' ? summaryMsg.content : '';
+    return {
+      ok: true,
+      messageCount: messages.length,
+      compressedCount: compressed.length,
+      summary: summaryText,
+    };
+  });
+
+  // ---------- Context: Breakdown (/context command) ----------
+  ipcMain.handle(Channels.Agent.GET_CONTEXT, async (_e, sessionId: string) => {
+    const model = getActiveModel();
+    const modelId = model?.modelId ?? 'unknown';
+    return analyzeContextBreakdown(sessionId, modelId);
+  });
+
+  // ---------- Quick Command (> / $ prefix) ----------
+  // Directly executes a shell command via SSH without going through the AI
+  // agent loop. Prevents the bug where ">ls @test" was sent as a chat
+  // message and the AI interpreted it as a work request.
+  ipcMain.handle(
+    Channels.Agent.QUICK_COMMAND,
+    async (_e, _sessionId: string, command: string, hostName?: string) => {
+      try {
+        // Resolve host
+        let host;
+        if (hostName) {
+          host = hostsStore.getByName(hostName);
+        } else {
+          // Use the first available host if none specified
+          const allHosts = hostsStore.list();
+          host = allHosts[0] ?? null;
+        }
+        if (!host) {
+          return {
+            ok: false,
+            error: hostName ? `主机 '${hostName}' 不存在` : '未配置任何主机',
+          };
+        }
+
+        const manager = await connectionPool.get(host.id);
+        const result = await execCommand(manager, command);
+        return {
+          ok: true,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          hostName: host.name,
+          command,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: (err as Error).message,
+          command,
+          hostName,
+        };
+      }
+    },
+  );
+
+  // ---------- Skills ----------
+  ipcMain.handle(Channels.Skills.LIST, async () => {
+    const all = listAllSkills();
+    const enabled = new Set(getEnabledSkills().map((s) => s.name));
+    return all.map((s) => ({
+      name: s.name,
+      displayName: s.displayName,
+      description: s.description,
+      whenToUse: s.whenToUse,
+      source: s.source,
+      enabled: enabled.has(s.name),
+      enabledByDefault: s.enabledByDefault,
+      filePath: s.filePath,
+    }));
+  });
+
+  ipcMain.handle(Channels.Skills.GET_CONTENT, async (_e, name: string) => {
+    return getSkillContent(name);
+  });
+
+  ipcMain.handle(
+    Channels.Skills.INSTALL,
+    async (_e, name: string, content: string, description?: string, whenToUse?: string) => {
+      return installSkill(name, content, description, whenToUse);
+    },
+  );
+
+  ipcMain.handle(Channels.Skills.DELETE, async (_e, name: string) => {
+    return deleteSkill(name);
+  });
+
+  ipcMain.handle(Channels.Skills.TOGGLE, async (_e, name: string, enabled: boolean) => {
+    setSkillEnabled(name, enabled);
   });
 
   // ---------- Tasks (TodoWrite) ----------
