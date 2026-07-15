@@ -38,12 +38,15 @@ export function updateBudget(
   const total = usage.totalTokens ?? 0;
   const prompt = usage.promptTokens ?? 0;
   const completion = usage.completionTokens ?? 0;
-  // Prefer explicit totalTokens; fall back to prompt+completion
-  const delta = total > 0 ? total : prompt + completion;
+  // Prefer explicit totalTokens; fall back to prompt+completion.
+  // Each round's promptTokens already includes all prior context (system prompt +
+  // messages + tools), so totalTokens for a round = current context window occupancy.
+  // Do NOT accumulate across rounds - that double-counts re-sent context.
+  const currentRound = total > 0 ? total : prompt + completion;
 
   tracker.prevDeltaTokens = tracker.lastDeltaTokens;
-  tracker.lastDeltaTokens = delta;
-  tracker.totalTokensUsed += delta;
+  tracker.lastDeltaTokens = currentRound;
+  tracker.totalTokensUsed = Math.max(tracker.totalTokensUsed, currentRound);
 }
 
 export interface BudgetCheckResult {

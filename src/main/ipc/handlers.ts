@@ -148,6 +148,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   // ---------- Audit ----------
   ipcMain.handle(Channels.Audit.LIST, async (_e, filter) => auditStore.list(filter));
+  ipcMain.handle(Channels.Audit.COUNT, async (_e, filter) => auditStore.count(filter));
   ipcMain.handle(Channels.Audit.CREATE, async (_e, payload) => auditStore.create(payload));
   ipcMain.handle(Channels.Audit.VERIFY, async () => auditStore.verifyIntegrity());
 

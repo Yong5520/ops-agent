@@ -40,7 +40,7 @@ function rowToLog(row: AuditRow): AuditLog {
   };
 }
 
-function buildQuery(filter: AuditFilter): { sql: string; params: unknown[] } {
+function buildWhereClause(filter: AuditFilter): { whereClause: string; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
 
@@ -76,11 +76,7 @@ function buildQuery(filter: AuditFilter): { sql: string; params: unknown[] } {
   }
 
   const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const limit = filter.limit ?? 500;
-  const offset = filter.offset ?? 0;
-  const sql = `SELECT * FROM audit_logs ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  params.push(limit, offset);
-  return { sql, params };
+  return { whereClause, params };
 }
 
 function buildChainContent(payload: AuditLogInput): string {
@@ -141,18 +137,21 @@ export const auditStore = {
   },
 
   list(filter: AuditFilter = {}): AuditLog[] {
-    const { sql, params } = buildQuery(filter);
+    const { whereClause, params } = buildWhereClause(filter);
+    const limit = filter.limit ?? 500;
+    const offset = filter.offset ?? 0;
+    const sql = `SELECT * FROM audit_logs ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
     const rows = getDb()
       .prepare(sql)
-      .all(...params) as AuditRow[];
+      .all(...params, limit, offset) as AuditRow[];
     return rows.map(rowToLog);
   },
 
   count(filter: AuditFilter = {}): number {
-    const { sql, params } = buildQuery(filter);
-    const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as cnt');
+    const { whereClause, params } = buildWhereClause(filter);
+    const sql = `SELECT COUNT(*) as cnt FROM audit_logs ${whereClause}`;
     const row = getDb()
-      .prepare(countSql)
+      .prepare(sql)
       .get(...params) as { cnt: number };
     return row.cnt;
   },

@@ -274,6 +274,7 @@ interface OpsAgentApi {
   };
   audit: {
     list: (filter: AuditFilter) => Promise<AuditLog[]>;
+    count: (filter: AuditFilter) => Promise<number>;
     create: (payload: AuditLogInput) => Promise<AuditLog>;
     verifyIntegrity: () => Promise<string[]>;
   };

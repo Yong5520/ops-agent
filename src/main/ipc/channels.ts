@@ -38,6 +38,7 @@ export const Channels = {
   },
   Audit: {
     LIST: 'audit:list',
+    COUNT: 'audit:count',
     CREATE: 'audit:create',
     VERIFY: 'audit:verify',
   },

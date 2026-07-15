@@ -48,6 +48,7 @@ const api: OpsAgentApi = {
   // Audit
   audit: {
     list: (filter) => ipcRenderer.invoke('audit:list', filter),
+    count: (filter) => ipcRenderer.invoke('audit:count', filter),
     create: (payload) => ipcRenderer.invoke('audit:create', payload),
     verifyIntegrity: () => ipcRenderer.invoke('audit:verify'),
   },

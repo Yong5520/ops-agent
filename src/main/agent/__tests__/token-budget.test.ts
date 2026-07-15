@@ -31,12 +31,14 @@ describe('token-budget', () => {
       expect(tracker.totalTokensUsed).toBe(5000);
     });
 
-    it('accumulates across multiple updates', () => {
+    it('tracks last round total (not cumulative) across multiple updates', () => {
       const tracker = createBudgetTracker(80_000);
       updateBudget(tracker, { totalTokens: 3000 });
       updateBudget(tracker, { totalTokens: 4000 });
       updateBudget(tracker, { totalTokens: 2000 });
-      expect(tracker.totalTokensUsed).toBe(9000);
+      // Each round re-sends full context, so totalTokensUsed = max round, not sum.
+      // This reflects actual context window occupancy, not cumulative API consumption.
+      expect(tracker.totalTokensUsed).toBe(4000);
     });
 
     it('tracks prevDeltaTokens', () => {
