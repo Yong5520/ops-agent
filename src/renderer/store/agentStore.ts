@@ -52,6 +52,7 @@ interface AgentStore {
     userMessage: string;
     hostIds: string[];
     safetyMode: SafetyMode;
+    attachments?: AgentAttachmentInput[];
   }) => Promise<void>;
   cancelRun: (sessionId: string) => Promise<void>;
   respondAuth: (
@@ -256,6 +257,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         userMessage: params.userMessage,
         hostIds: params.hostIds,
         safetyMode: params.safetyMode,
+        attachments: params.attachments,
       });
     } catch (err) {
       const msg = (err as Error).message;

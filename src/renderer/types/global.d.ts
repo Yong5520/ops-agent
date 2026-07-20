@@ -29,6 +29,7 @@ interface AgentRunRequest {
   hostIds: string[];
   safetyMode: SafetyMode;
   maxSteps?: number;
+  attachments?: AgentAttachmentInput[];
 }
 
 interface AgentTextStreamEvent {
@@ -225,6 +226,21 @@ interface SkillInfo {
   enabled: boolean;
   enabledByDefault: boolean;
   filePath?: string;
+  scriptCount: number;
+  referenceCount: number;
+  assetCount: number;
+}
+
+interface SkillFileEntry {
+  path: string;
+  category: 'script' | 'reference' | 'asset';
+  size: number;
+  preview: string;
+}
+
+interface SkillFileInput {
+  path: string;
+  content: string;
 }
 
 interface OpsAgentApi {
@@ -303,9 +319,25 @@ interface OpsAgentApi {
       content: string,
       description?: string,
       whenToUse?: string,
+      files?: SkillFileInput[],
     ) => Promise<{ ok: boolean; error?: string }>;
     remove: (name: string) => Promise<{ ok: boolean; error?: string }>;
     toggle: (name: string, enabled: boolean) => Promise<void>;
+    listFiles: (name: string) => Promise<SkillFileEntry[]>;
+    readFile: (
+      name: string,
+      filePath: string,
+    ) => Promise<{ ok: boolean; content?: string; error?: string }>;
+    writeFile: (
+      name: string,
+      filePath: string,
+      content: string,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    deleteFile: (name: string, filePath: string) => Promise<{ ok: boolean; error?: string }>;
+    importFromDir: (
+      srcPath: string,
+      skillName?: string,
+    ) => Promise<{ ok: boolean; error?: string; name?: string }>;
   };
   agent: {
     run: (request: AgentRunRequest) => Promise<void>;
@@ -335,6 +367,9 @@ interface OpsAgentApi {
   tasks: {
     list: (sessionId: string) => Promise<TodoItem[]>;
     update: (sessionId: string, todos: TodoItem[]) => Promise<{ success: boolean }>;
+  };
+  attachments: {
+    read: (attachmentId: string) => Promise<string | null>;
   };
   terminal: {
     start: (hostId: string) => Promise<{ sessionId: string; hostName: string }>;
@@ -371,6 +406,11 @@ interface OpsAgentApi {
   dialog: {
     saveFile: (defaultName: string, title?: string) => Promise<string | null>;
     openFile: () => Promise<string | null>;
+    openDirectory: () => Promise<string | null>;
+  };
+  clipboard: {
+    writeText: (text: string) => void;
+    readText: () => string;
   };
   ai: {
     generateCommand: (
@@ -391,6 +431,11 @@ interface OpsAgentApi {
 declare global {
   interface Window {
     opsAgent: OpsAgentApi;
+  }
+  interface AgentAttachmentInput {
+    data: string;
+    mimeType: string;
+    originalName?: string;
   }
 }
 

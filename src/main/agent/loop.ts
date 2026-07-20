@@ -13,7 +13,8 @@ import {
   compactMessages,
   estimateTokens,
 } from './context.js';
-import { createBudgetTracker, updateBudget, checkTokenBudget } from './token-budget.js';
+import { createBudgetTracker, updateBudget } from './token-budget.js';
+import { evaluateStallDecision } from './stall-detection.js';
 import {
   createDenialTracker,
   recordDenial,
@@ -24,6 +25,7 @@ import type { ModeHolder } from './tools/exit-plan-mode.js';
 import { hostsStore } from '../storage/hosts.js';
 import { modelsStore } from '../storage/models.js';
 import { gatherMultipleHostFacts } from './facts.js';
+import { attachmentsStore } from '../storage/attachments.js';
 import { logger } from '../utils/logger.js';
 import type { AgentLoopParams, SessionContext, ToolCallResult } from './types.js';
 
@@ -105,7 +107,9 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       ? `[运行时上下文]\n${dynamicSuffix}\n\n---\n\n${userMessage}`
       : userMessage;
 
-    let messages: CoreMessage[] = [...buildMessagesForCall(history, enhancedUserMessage)];
+    let messages: CoreMessage[] = [
+      ...buildMessagesForCall(history, enhancedUserMessage, params.attachments),
+    ];
 
     // Prepend static system message with prompt-cache marker. The
     // providerOptions.anthropic.cacheControl tells the Anthropic provider
@@ -120,8 +124,27 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     };
     messages = [systemMessage, ...messages];
 
-    // Save original user message (not enhanced) to DB
-    saveUserMessage(sessionId, userMessage);
+    // Save original user message (not enhanced) to DB, then save any image
+    // attachments to disk + DB so they're available for history reload.
+    const userMessageId = saveUserMessage(sessionId, userMessage);
+    if (params.attachments && params.attachments.length > 0) {
+      for (const att of params.attachments) {
+        try {
+          attachmentsStore.save({
+            messageId: userMessageId,
+            sessionId,
+            data: att.data,
+            mimeType: att.mimeType,
+            originalName: att.originalName,
+          });
+        } catch (err) {
+          logger.error(`[Agent] Failed to save attachment: ${(err as Error).message}`);
+        }
+      }
+      logger.info(
+        `[Agent] Saved ${params.attachments.length} attachment(s) for message ${userMessageId}`,
+      );
+    }
 
     // ── 5. Create tools ────────────────────────────────────────────────────
     // modeHolder allows ExitPlanMode to switch mode mid-loop (plan -> operator)
@@ -179,11 +202,12 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     let currentMaxTokens = INITIAL_MAX_TOKENS;
     let outputTokensRecoveryCount = 0;
 
-    // ── Token budget tracker (P0-3.3) ────────────────────────────────────
-    // Tracks total tokens consumed. When the model stops inconclusively
-    // (tools called + short text), checks if budget allows continuation.
-    // Also detects diminishing returns after 3+ continuations.
-    const MAX_CONTINUATIONS = 3;
+    // ── Token budget tracker ─────────────────────────────────────────────
+    // Tracks total tokens consumed for context-usage reporting. The
+    // continuation-nudge feature that previously used this for deciding
+    // whether to push the model to "continue unfinished tasks" has been
+    // removed (it caused over-action: agent fixing when user only asked
+    // to analyze).
     const budgetTracker = createBudgetTracker(contextWindow);
 
     let nudgeCount = 0;
@@ -432,23 +456,23 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
           params.onTextStream('\n\n');
           stalled = true;
         } else {
-          // Detect "inconclusive stop": model called tools but stopped without a
-          // substantive conclusion. Two stall patterns:
-          //  (a) short transitional phrase - text < threshold AND matches
-          //      transition words
-          //  (b) zero text after tool calls - model called tools, produced no
-          //      assistant text, and stopped (user sees only tool cards, no analysis)
-          const isTransitionStall =
-            roundText.length > 0 &&
-            roundText.length < STALL_TEXT_THRESHOLD &&
-            STALL_TRANSITION_PATTERN.test(roundText);
-          const isEmptyStall = roundText.length === 0;
+          // Evaluate whether this stop is a stall (needs a conclusion nudge)
+          // or a substantive response (model is done, stop).
+          const stallDecision = evaluateStallDecision({
+            finishReason: lastFinishReason,
+            toolCallCount,
+            roundText,
+            nudgeCount,
+            maxNudgeRounds: MAX_NUDGE_ROUNDS,
+            transitionPattern: STALL_TRANSITION_PATTERN,
+            textThreshold: STALL_TEXT_THRESHOLD,
+          });
 
-          if ((isTransitionStall || isEmptyStall) && nudgeCount < MAX_NUDGE_ROUNDS) {
-            // Existing nudge for inconclusive stop
+          if (stallDecision.shouldNudge) {
+            // Conclusion nudge for transition/empty stall
             nudgeCount++;
             logger.info(
-              `[Agent] Detected inconclusive stop (toolCalls=${toolCallCount}, text=${roundText.length} chars); nudging for conclusion, round ${nudgeCount}/${MAX_NUDGE_ROUNDS}`,
+              `[Agent] Detected ${stallDecision.reason} (toolCalls=${toolCallCount}, text=${roundText.length} chars); nudging for conclusion, round ${nudgeCount}/${MAX_NUDGE_ROUNDS}`,
             );
 
             // CRITICAL: Use result.response.messages (not roundText) so the next
@@ -470,41 +494,15 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
             params.onTextStream('\n\n');
             stalled = true;
           } else {
-            // P0-3.3: Token budget continuation - if budget allows, nudge to continue
-            const budget = checkTokenBudget(budgetTracker, MAX_CONTINUATIONS);
-            if (budget.canContinue && budgetTracker.continuationCount < MAX_CONTINUATIONS) {
-              budgetTracker.continuationCount++;
-              const pct = Math.round(
-                (budgetTracker.totalTokensUsed / budgetTracker.contextWindow) * 100,
-              );
-              logger.info(
-                `[Agent] Token budget continuation ${budgetTracker.continuationCount}/${MAX_CONTINUATIONS} (${pct}% used, ${budget.remainingTokens} tokens remaining)`,
-              );
-              const response = await result.response;
-              messages = [
-                ...messages,
-                ...response.messages,
-                {
-                  role: 'user' as const,
-                  content:
-                    '\u8bf7\u7ee7\u7eed\u6267\u884c\u672a\u5b8c\u6210\u7684\u4efb\u52a1\uff0c\u4e0d\u8981\u603b\u7ed3\u3002',
-                },
-              ];
-              fullText += '\n\n';
-              params.onTextStream('\n\n');
-              stalled = true;
-            } else {
-              if (budget.reason === 'budget_exhausted') {
-                logger.info(
-                  `[Agent] Token budget exhausted (${budgetTracker.totalTokensUsed}/${budgetTracker.contextWindow} tokens), stopping`,
-                );
-              } else if (budget.reason === 'diminishing_returns') {
-                logger.info(
-                  `[Agent] Diminishing returns detected, stopping (last delta=${budgetTracker.lastDeltaTokens} tokens)`,
-                );
-              }
-              stalled = false;
-            }
+            // Model produced substantive text or exhausted nudge rounds.
+            // Do NOT continue - the model has completed its response.
+            // Previously a "token budget continuation" nudge fired here
+            // ("continue unfinished tasks, don't summarize"), causing
+            // over-action (agent fixing when user only asked to analyze).
+            logger.info(
+              `[Agent] Stopping after substantive response (reason=${stallDecision.reason}, toolCalls=${toolCallCount}, text=${roundText.length} chars)`,
+            );
+            stalled = false;
           }
         }
       } else {
@@ -552,15 +550,20 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
 }
 
 // Format model API errors into user-friendly messages.
+// Uses word-boundary regex for HTTP status codes to avoid false matches
+// inside request IDs or hex strings (e.g., "02178412064429246d1ea..." contains "429").
 function formatModelError(err: Error): string {
   const msg = err.message;
-  if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('invalid api key')) {
+  if (msg.includes('Unauthorized') || msg.includes('invalid api key') || /\b401\b/.test(msg)) {
     return '\u6a21\u578b API Key \u65e0\u6548\u6216\u5df2\u8fc7\u671f\u3002\u8bf7\u5728\u8bbe\u7f6e\u9875\u68c0\u67e5\u6a21\u578b\u914d\u7f6e\u3002';
   }
-  if (msg.includes('429') || msg.includes('rate limit') || msg.includes('Rate limit')) {
+  if (msg.includes('rate limit') || msg.includes('Rate limit') || /\b429\b/.test(msg)) {
     return '\u6a21\u578b API \u8bf7\u6c42\u9891\u7387\u8d85\u9650\u3002\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u68c0\u67e5 API \u914d\u989d\u3002';
   }
-  if (msg.includes('500') || msg.includes('502') || msg.includes('503')) {
+  if (msg.includes('specified action is invalid') || msg.includes('invalid action')) {
+    return '\u6a21\u578b API \u7aef\u70b9\u8def\u5f84\u9519\u8bef\u3002\u8bf7\u68c0\u67e5\u7aef\u70b9 URL \u662f\u5426\u6b63\u786e\u3002OpenAI \u517c\u5bb9\u6a21\u578b\u5e94\u4f7f\u7528 /api/v3 \u7ed3\u5c3e\uff08\u4e0d\u5305\u542b /responses\uff09\u3002';
+  }
+  if (/\b50[023]\b/.test(msg)) {
     return '\u6a21\u578b\u670d\u52a1\u7aef\u9519\u8bef\u3002\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002';
   }
   if (
@@ -569,7 +572,7 @@ function formatModelError(err: Error): string {
     msg.includes('fetch failed') ||
     msg.includes('Cannot connect to API')
   ) {
-    return '\u65e0\u6cd5\u8fde\u63a5\u6a21\u578b API \u7aef\u70b9\u3002\u8fd9\u901a\u5e38\u662f\u7531\u4e8e\u7aef\u70b9 URL \u4e0d\u6b63\u786e\uff08\u9700\u4ee5 /v1 \u7ed3\u5c3e\uff09\u3001\u6a21\u578b\u540d\u79f0\u4e0d\u5b58\u5728\u3001\u6216\u7f51\u7edc\u4e0d\u901a\u5bfc\u81f4\u3002\u8bf7\u5728\u8bbe\u7f6e\u9875\u68c0\u67e5\u6a21\u578b\u914d\u7f6e\u5e76\u70b9\u51fb\u201c\u6d4b\u8bd5\u8fde\u63a5\u201d\u3002';
+    return '\u65e0\u6cd5\u8fde\u63a5\u6a21\u578b API \u7aef\u70b9\u3002\u8fd9\u901a\u5e38\u662f\u7531\u4e8e\u7aef\u70b9 URL \u4e0d\u6b63\u786e\u3001\u6a21\u578b\u540d\u79f0\u4e0d\u5b58\u5728\u3001\u6216\u7f51\u7edc\u4e0d\u901a\u5bfc\u81f4\u3002\u8bf7\u5728\u8bbe\u7f6e\u9875\u68c0\u67e5\u6a21\u578b\u914d\u7f6e\u5e76\u70b9\u51fb\u201c\u6d4b\u8bd5\u8fde\u63a5\u201d\u3002';
   }
   if (msg.includes('No active model provider')) {
     return '\u672a\u914d\u7f6e\u6d3b\u8dc3\u6a21\u578b\u4f9b\u5e94\u5546\u3002\u8bf7\u5148\u5728\u8bbe\u7f6e\u9875\u914d\u7f6e\u6a21\u578b\u3002';

@@ -68,7 +68,7 @@ export function ChatPage() {
     loadHosts();
   }, [loadModels, loadHosts]);
 
-  const handleSend = async (text: string) => {
+  const handleSend = async (text: string, attachments?: AgentAttachmentInput[]) => {
     // Check for quick commands (> or $ prefix) - directly execute via SSH
     // without going through the AI agent loop.
     const quickCmd = parseQuickCommand(text);
@@ -130,6 +130,7 @@ export function ChatPage() {
       userMessage: text,
       hostIds: latestHostIds,
       safetyMode,
+      attachments,
     });
   };
 

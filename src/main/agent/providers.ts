@@ -158,12 +158,19 @@ export async function validateModelExists(provider: ModelProvider): Promise<void
 }
 
 // Normalize an endpoint URL. Auto-appends /v1 if the URL doesn't already
-// end with a version segment (e.g., /v1, /v2). This handles the common
-// case where users enter a bare host URL like "http://10.114.22.18:3000".
+// contain a version segment (e.g., /v1, /v2, /v3) anywhere in the path.
+// This handles:
+//   - Bare host URLs: "http://10.114.22.18:3000" -> ".../v1"
+//   - URLs with version in path: "https://ark.../api/v3" -> no append
+//   - URLs with version mid-path: "https://ark.../api/v3/responses" -> no append
+//   - Trailing slashes are stripped.
 export function normalizeBaseURL(endpoint: string | undefined, defaultURL: string): string {
   const url = endpoint?.trim() || defaultURL;
   const trimmed = url.replace(/\/+$/, '');
-  if (!/\/v\d+$/.test(trimmed)) {
+  // Check if any path segment matches v\d+ (e.g., v1, v2, v3)
+  const pathSegments = trimmed.split('/').filter(Boolean);
+  const hasVersionSegment = pathSegments.some((seg) => /^v\d+$/.test(seg));
+  if (!hasVersionSegment) {
     return `${trimmed}/v1`;
   }
   return trimmed;

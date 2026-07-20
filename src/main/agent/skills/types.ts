@@ -8,6 +8,19 @@
 
 export type SkillSource = 'builtin' | 'user';
 
+// A file within a skill directory (scripts/, references/, assets/).
+// Discovered during loadUserSkills and listed in the skill's file manifest.
+export interface SkillFile {
+  // Relative path within skill dir, e.g. "scripts/check.sh"
+  path: string;
+  // Which subdirectory the file lives in
+  category: 'script' | 'reference' | 'asset';
+  // File size in bytes
+  size: number;
+  // First ~200 chars for manifest display (empty for binary files)
+  preview: string;
+}
+
 export interface Skill {
   // Unique identifier (kebab-case)
   name: string;
@@ -30,6 +43,11 @@ export interface Skill {
   source: SkillSource;
   // File path for user skills (undefined for builtin)
   filePath?: string;
+  // Files discovered in scripts/, references/, assets/ subdirectories.
+  // Empty for builtin skills and user skills without subdirs.
+  scripts: SkillFile[];
+  references: SkillFile[];
+  assets: SkillFile[];
 }
 
 // Persisted in app_settings under key "enabledSkills" as JSON string[].

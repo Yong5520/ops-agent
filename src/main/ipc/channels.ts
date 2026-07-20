@@ -65,6 +65,11 @@ export const Channels = {
     INSTALL: 'skills:install',
     DELETE: 'skills:delete',
     TOGGLE: 'skills:toggle',
+    LIST_FILES: 'skills:listFiles',
+    READ_FILE: 'skills:readFile',
+    WRITE_FILE: 'skills:writeFile',
+    DELETE_FILE: 'skills:deleteFile',
+    IMPORT_FROM_DIR: 'skills:importFromDir',
   },
   Agent: {
     RUN: 'agent:run',
@@ -94,6 +99,9 @@ export const Channels = {
   Tasks: {
     LIST: 'tasks:list',
     UPDATE: 'tasks:update',
+  },
+  Attachments: {
+    READ: 'attachments:read',
   },
   Window: {
     RESTORE_FOCUS: 'window:restoreFocus',

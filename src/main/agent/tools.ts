@@ -18,7 +18,13 @@ import type {
 } from './types.js';
 import { createTodoWriteTool } from './tools/todo-write.js';
 import { createUpdateMemoryTool } from './tools/update-memory.js';
-import { installSkill, getSkillContent, listAllSkills } from './skills/index.js';
+import {
+  installSkill,
+  getSkillContent,
+  listAllSkills,
+  readSkillFile,
+  type SkillFileInput,
+} from './skills/index.js';
 import {
   createExitPlanModeTool,
   type ModeHolder,
@@ -1346,7 +1352,7 @@ export function createTools(deps: ToolFactoryDeps) {
 
     get_skill_content: tool({
       description:
-        "Get the full content of a skill by name. Skills are listed in the system prompt metadata. Use this to load the complete diagnostic procedure when the user's request matches a skill but they haven't explicitly invoked it via /skillName.",
+        "Get the full content of a skill by name. Skills are listed in the system prompt metadata. Use this to load the complete diagnostic procedure when the user's request matches a skill but they haven't explicitly invoked it via /skillName. The returned content includes a file manifest if the skill has scripts/references/assets - use read_skill_file to read individual files.",
       parameters: z.object({
         name: z.string().describe('The skill name (e.g., "nginx-diagnosis", "system-diagnosis")'),
       }),
@@ -1364,9 +1370,25 @@ export function createTools(deps: ToolFactoryDeps) {
       },
     }),
 
+    read_skill_file: tool({
+      description:
+        'Read a file from a skill directory by relative path. Skills may include scripts/, references/, and assets/ subdirectories. The file path is relative to the skill directory (e.g., "scripts/check.sh", "references/api-spec.md"). Use this after get_skill_content to load individual files listed in the manifest.',
+      parameters: z.object({
+        skillName: z.string().describe('The skill name (e.g., "redis-diagnosis")'),
+        filePath: z.string().describe('Relative path within skill dir, e.g. "scripts/check.sh"'),
+      }),
+      execute: async ({ skillName, filePath }) => {
+        const result = readSkillFile(skillName, filePath);
+        if (!result.ok) {
+          return { error: result.error };
+        }
+        return { skillName, filePath, content: result.content };
+      },
+    }),
+
     install_skill: tool({
       description:
-        'Install a new skill from user request. Creates a SKILL.md file that can be invoked via /skillName. Use when the user asks to install or create a skill.',
+        'Install a new skill from user request. Creates a SKILL.md file that can be invoked via /skillName. Use when the user asks to install or create a skill. Optionally include scripts/references/assets files.',
       parameters: z.object({
         name: z
           .string()
@@ -1379,9 +1401,24 @@ export function createTools(deps: ToolFactoryDeps) {
           .string()
           .optional()
           .describe('When this skill should be used (e.g., "当用户报告 Redis 相关问题时")'),
+        files: z
+          .array(
+            z.object({
+              path: z.string().describe('Relative path within skill dir, e.g. "scripts/check.sh"'),
+              content: z.string().describe('File content'),
+            }),
+          )
+          .optional()
+          .describe('Additional files to install (scripts/references/assets)'),
       }),
-      execute: async ({ name, description, content, whenToUse }) => {
-        const result = installSkill(name, content, description, whenToUse);
+      execute: async ({ name, description, content, whenToUse, files }) => {
+        const result = installSkill(
+          name,
+          content,
+          description,
+          whenToUse,
+          files as SkillFileInput[] | undefined,
+        );
         if (!result.ok) {
           return { error: result.error };
         }

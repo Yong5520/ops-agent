@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { useTerminalStore } from '../../store/terminalStore.js';
+import { decideRightClickAction } from '../../lib/terminal-right-click.js';
 import '@xterm/xterm/css/xterm.css';
 
 interface TerminalViewProps {
@@ -197,9 +198,27 @@ export function TerminalView({
   const fitRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
-  const { updateTabStatus, tabs, broadcastMode } = useTerminalStore();
+  const { updateTabStatus, tabs, broadcastMode, rightClickMode, setRightClickMode } =
+    useTerminalStore();
   const [showSearch, setShowSearch] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, visible: false });
+  const [copiedFlash, setCopiedFlash] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Briefly show a "已复制" badge so right-click copy gives visible feedback
+  // (the clipboard write itself is silent).
+  const flashCopied = useCallback(() => {
+    setCopiedFlash(true);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopiedFlash(false), 1000);
+  }, []);
+
+  // Clear the flash timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   // Keep refs in sync for broadcast mode (avoids stale closure in onData)
   const tabsRef = useRef(tabs);
@@ -243,6 +262,10 @@ export function TerminalView({
         brightWhite: '#fafafa',
       },
       allowProposedApi: true,
+      // Ensure right-click never alters the drag-selection (on macOS the
+      // default is to select the word under the cursor, which would replace
+      // the user's selection and break right-click copy).
+      rightClickSelectsWord: false,
     });
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
@@ -341,24 +364,17 @@ export function TerminalView({
         e.preventDefault();
         const selection = term.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection).catch(() => {
-            // ignore clipboard errors
-          });
+          window.opsAgent.clipboard.writeText(selection);
+          flashCopied();
         }
         return false;
       }
       if (e.ctrlKey && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
         e.preventDefault();
-        navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text) {
-              window.opsAgent.terminal.input(sessionId, text);
-            }
-          })
-          .catch(() => {
-            // ignore clipboard errors
-          });
+        const text = window.opsAgent.clipboard.readText();
+        if (text) {
+          window.opsAgent.terminal.input(sessionId, text);
+        }
         return false;
       }
       return true;
@@ -398,30 +414,48 @@ export function TerminalView({
   }, [isActive]);
 
   // ── Context menu actions ──────────────────────────────────────────────
+  // Uses the Electron clipboard bridge (window.opsAgent.clipboard) which is
+  // synchronous and reliable - navigator.clipboard can reject with "Document
+  // is not focused" after xterm focuses its hidden textarea on right-click.
   const handleCopy = () => {
     const selection = termRef.current?.getSelection();
     if (selection) {
-      navigator.clipboard.writeText(selection).catch(() => {
-        // ignore
-      });
+      window.opsAgent.clipboard.writeText(selection);
+      flashCopied();
     }
+    termRef.current?.focus();
   };
 
   const handlePaste = () => {
-    navigator.clipboard
-      .readText()
-      .then((text) => {
-        if (text) {
-          window.opsAgent.terminal.input(sessionId, text);
-        }
-      })
-      .catch(() => {
-        // ignore
-      });
+    const text = window.opsAgent.clipboard.readText();
+    if (text) {
+      window.opsAgent.terminal.input(sessionId, text);
+    }
+    // Re-focus immediately so the terminal keeps keyboard focus.
+    termRef.current?.focus();
+  };
+
+  // MobaXterm-style quick copy/paste (right-click without the menu)
+  const handleQuickCopy = () => {
+    const selection = termRef.current?.getSelection();
+    if (selection) {
+      window.opsAgent.clipboard.writeText(selection);
+      flashCopied();
+    }
+    termRef.current?.focus();
+  };
+
+  const handleQuickPaste = () => {
+    const text = window.opsAgent.clipboard.readText();
+    if (text) {
+      window.opsAgent.terminal.input(sessionId, text);
+    }
+    termRef.current?.focus();
   };
 
   const handleClear = () => {
     termRef.current?.clear();
+    termRef.current?.focus();
   };
 
   const handleExport = () => {
@@ -441,7 +475,22 @@ export function TerminalView({
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, visible: true });
+    const action = decideRightClickAction(
+      !!termRef.current?.hasSelection(),
+      rightClickMode,
+      e.shiftKey,
+    );
+    switch (action) {
+      case 'copy':
+        handleQuickCopy();
+        return;
+      case 'paste':
+        handleQuickPaste();
+        return;
+      case 'menu':
+        setContextMenu({ x: e.clientX, y: e.clientY, visible: true });
+        return;
+    }
   };
 
   const contextMenuActions = {
@@ -464,11 +513,31 @@ export function TerminalView({
         onClose={() => setContextMenu((s) => ({ ...s, visible: false }))}
         actions={contextMenuActions}
       />
+      {copiedFlash && (
+        <div className="pointer-events-none absolute right-3 top-3 z-50 rounded-md bg-emerald-600/90 px-2 py-1 text-xs font-medium text-white shadow-lg">
+          ✓ 已复制
+        </div>
+      )}
       <div ref={containerRef} className="flex-1 overflow-hidden bg-[#0a0a0a] px-2 py-1" />
       <div className="flex items-center justify-between border-t border-zinc-800 px-3 py-1 text-xs text-zinc-600">
         <span>{hostName}</span>
         <div className="flex items-center gap-2">
           {broadcastMode && isActive && <span className="text-amber-400">📡 广播模式</span>}
+          <button
+            onClick={() => setRightClickMode(rightClickMode === 'quick' ? 'menu' : 'quick')}
+            className={
+              rightClickMode === 'quick'
+                ? 'text-indigo-400 hover:text-indigo-300'
+                : 'text-zinc-600 hover:text-zinc-300'
+            }
+            title={
+              rightClickMode === 'quick'
+                ? '右键: 快速复制/粘贴 (Shift+右键 打开菜单) — 点击切换为菜单模式'
+                : '右键: 菜单模式 — 点击切换为快速复制/粘贴'
+            }
+          >
+            {rightClickMode === 'quick' ? '⧉' : '☰'}
+          </button>
           <button
             onClick={() => setShowSearch(true)}
             className="text-zinc-600 hover:text-zinc-300"

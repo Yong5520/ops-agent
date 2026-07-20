@@ -159,7 +159,16 @@ export function MessageList({
           className="sticky bottom-4 left-full mr-4 flex h-9 w-9 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-zinc-400 shadow-lg hover:bg-zinc-800 hover:text-zinc-100"
           title="回到底部"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
             <path d="M12 5v14" />
             <path d="m19 12-7 7-7-7" />
           </svg>
@@ -177,7 +186,11 @@ interface MessageBubbleProps {
 
 // Memoized to prevent re-rendering on every streaming token change.
 // Only re-renders when the message itself changes.
-const MessageBubble = memo(function MessageBubble({ message, canEdit, onEdit }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({
+  message,
+  canEdit,
+  onEdit,
+}: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
@@ -212,6 +225,9 @@ const MessageBubble = memo(function MessageBubble({ message, canEdit, onEdit }: 
           ) : (
             <MarkdownRenderer content={message.content} />
           )}
+          {message.attachments && message.attachments.length > 0 && (
+            <MessageAttachments attachments={message.attachments} />
+          )}
         </div>
         {/* Edit button on user messages — only when not running */}
         {isUser && canEdit && onEdit && (
@@ -239,3 +255,50 @@ const MessageBubble = memo(function MessageBubble({ message, canEdit, onEdit }: 
     </div>
   );
 });
+
+// Renders image attachments for a user message. Loads image data via IPC
+// (attachments:read) since the renderer cannot directly access the file system.
+function MessageAttachments({ attachments }: { attachments: NonNullable<Message['attachments']> }) {
+  const [imageUrls, setImageUrls] = useState<Record<string, string | null>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      attachments.map(async (att) => {
+        try {
+          const dataUrl = await window.opsAgent.attachments.read(att.id);
+          return [att.id, dataUrl] as const;
+        } catch {
+          return [att.id, null] as const;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      const map: Record<string, string | null> = {};
+      for (const [id, url] of results) map[id] = url;
+      setImageUrls(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [attachments]);
+
+  if (attachments.length === 0) return null;
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {attachments.map((att) => {
+        const url = imageUrls[att.id];
+        return (
+          <img
+            key={att.id}
+            src={url ?? undefined}
+            alt={att.originalName ?? 'attachment'}
+            className="max-h-48 max-w-full rounded border border-zinc-700 object-contain"
+            loading="lazy"
+          />
+        );
+      })}
+    </div>
+  );
+}

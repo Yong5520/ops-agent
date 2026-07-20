@@ -1,11 +1,13 @@
-import type { CoreMessage } from 'ai';
+import type { CoreMessage, CoreUserMessage } from 'ai';
 import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
 import { getDb } from '../storage/database.js';
 import { sessionsStore } from '../storage/sessions.js';
+import { attachmentsStore } from '../storage/attachments.js';
 import { logger } from '../utils/logger.js';
 import { microcompactToolResults } from './compaction/microcompact.js';
 import { snipCompactIfNeeded } from './compaction/snip.js';
+import type { AttachmentInput } from './types.js';
 
 // Context manager — handles message history loading, format conversion,
 // and summary compression for the agent loop.
@@ -134,14 +136,24 @@ export function getContextWindowForModel(
 
 // Load session messages and convert to AI SDK CoreMessage[].
 // Prepends DB-persisted summary if available (P0-2.3).
+// Reconstructs multimodal content (text + image parts) for user messages
+// that have attachments stored in the message_attachments table.
 export function loadMessages(sessionId: string): CoreMessage[] {
   const messages = sessionsStore.listMessages(sessionId);
   const filtered = messages
     .filter((m) => m.role !== 'system') // system prompt is built separately
-    .map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    }));
+    .map((m) => {
+      if (m.role === 'user' && m.attachments && m.attachments.length > 0) {
+        return buildMultimodalUserMessage(m.content, {
+          kind: 'filePaths',
+          paths: m.attachments.map((a) => a.filePath),
+        });
+      }
+      return {
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      };
+    });
 
   // Prepend persisted summary if available
   const summary = loadSummaryFromDb(sessionId);
@@ -171,8 +183,9 @@ export function saveTurn(sessionId: string, userMessage: string, assistantMessag
   });
 }
 
-export function saveUserMessage(sessionId: string, content: string): void {
-  sessionsStore.addMessage({ sessionId, role: 'user', content });
+export function saveUserMessage(sessionId: string, content: string): string {
+  const msg = sessionsStore.addMessage({ sessionId, role: 'user', content });
+  return msg.id;
 }
 
 export function saveAssistantMessage(sessionId: string, content: string): void {
@@ -318,13 +331,49 @@ ${conversationText}`;
   return text.trim();
 }
 
+// Build a multimodal user message with text + image parts.
+// - When filePaths are provided, reads image files from disk (for history reload).
+// - When attachments are provided as AttachmentInput, uses base64 data directly
+//   (for the current turn's new attachments before they're saved to disk).
+type ImageSource =
+  { kind: 'filePaths'; paths: string[] } | { kind: 'inputs'; inputs: AttachmentInput[] };
+
+function buildMultimodalUserMessage(text: string, imageSource: ImageSource): CoreUserMessage {
+  const parts: Array<{ type: 'text'; text: string } | { type: 'image'; image: Uint8Array }> = [];
+  if (text) {
+    parts.push({ type: 'text', text });
+  }
+
+  if (imageSource.kind === 'filePaths') {
+    for (const filePath of imageSource.paths) {
+      const buffer = attachmentsStore.readData(filePath);
+      parts.push({ type: 'image', image: new Uint8Array(buffer) });
+    }
+  } else {
+    for (const input of imageSource.inputs) {
+      const match = input.data.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) continue;
+      const buffer = Buffer.from(match[2], 'base64');
+      parts.push({ type: 'image', image: new Uint8Array(buffer) });
+    }
+  }
+
+  return { role: 'user', content: parts };
+}
+
 // Build the full message array for the AI SDK call, including the new user message.
 // Applies microcompact + snip compaction to keep context manageable (P0-2).
 export function buildMessagesForCall(
   history: CoreMessage[],
   newUserMessage: string,
+  newAttachments?: AttachmentInput[],
 ): CoreMessage[] {
-  let messages = [...history, { role: 'user' as const, content: newUserMessage }];
+  const userMsg: CoreMessage =
+    newAttachments && newAttachments.length > 0
+      ? buildMultimodalUserMessage(newUserMessage, { kind: 'inputs', inputs: newAttachments })
+      : { role: 'user' as const, content: newUserMessage };
+
+  let messages = [...history, userMsg];
 
   // 1. Microcompact: truncate large tool results (cheapest, runs first)
   const micro = microcompactToolResults(messages);

@@ -9,15 +9,11 @@ describe('normalizeBaseURL', () => {
   });
 
   it('uses default when endpoint is empty', () => {
-    expect(normalizeBaseURL('', 'https://api.openai.com/v1')).toBe(
-      'https://api.openai.com/v1',
-    );
+    expect(normalizeBaseURL('', 'https://api.openai.com/v1')).toBe('https://api.openai.com/v1');
   });
 
   it('trims trailing slashes', () => {
-    expect(normalizeBaseURL('https://example.com/v1/', 'default')).toBe(
-      'https://example.com/v1',
-    );
+    expect(normalizeBaseURL('https://example.com/v1/', 'default')).toBe('https://example.com/v1');
   });
 
   it('auto-appends /v1 when missing (New API bare host)', () => {
@@ -27,9 +23,7 @@ describe('normalizeBaseURL', () => {
   });
 
   it('auto-appends /v1 to bare host with port', () => {
-    expect(normalizeBaseURL('http://localhost:8080', 'default')).toBe(
-      'http://localhost:8080/v1',
-    );
+    expect(normalizeBaseURL('http://localhost:8080', 'default')).toBe('http://localhost:8080/v1');
   });
 
   it('does NOT append /v1 when already present', () => {
@@ -63,8 +57,21 @@ describe('normalizeBaseURL', () => {
   });
 
   it('preserves /api/plan/v1 path with trailing slash', () => {
-    expect(
-      normalizeBaseURL('https://ark.cn-beijing.volces.com/api/plan/v1/', 'default'),
-    ).toBe('https://ark.cn-beijing.volces.com/api/plan/v1');
+    expect(normalizeBaseURL('https://ark.cn-beijing.volces.com/api/plan/v1/', 'default')).toBe(
+      'https://ark.cn-beijing.volces.com/api/plan/v1',
+    );
+  });
+
+  it('does NOT append /v1 when /v3 is mid-path (ark openai-compatible)', () => {
+    // User enters .../api/v3/responses - should NOT append /v1 because /v3 exists
+    expect(normalizeBaseURL('https://ark.cn-beijing.volces.com/api/v3/responses', 'default')).toBe(
+      'https://ark.cn-beijing.volces.com/api/v3/responses',
+    );
+  });
+
+  it('preserves /api/v3 path (ark OpenAI-compatible correct endpoint)', () => {
+    expect(normalizeBaseURL('https://ark.cn-beijing.volces.com/api/v3', 'default')).toBe(
+      'https://ark.cn-beijing.volces.com/api/v3',
+    );
   });
 });

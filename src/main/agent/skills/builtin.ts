@@ -15,6 +15,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['系统', '诊断', '体检', 'system', 'diagnosis', 'health'],
     enabledByDefault: true,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：系统全面诊断
 
 当用户要求"全面检查"或"系统诊断"时，按以下顺序执行：
@@ -37,6 +40,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['nginx', '502', '504', '网关', 'upstream'],
     enabledByDefault: true,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：Nginx 诊断
 
 当用户报告 nginx 相关问题（502/504/服务异常）时：
@@ -62,6 +68,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['docker', '容器', 'container', '镜像', 'image'],
     enabledByDefault: true,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：Docker 诊断
 
 当用户报告 docker/容器相关问题时：
@@ -87,6 +96,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['systemd', 'systemctl', 'service', '服务', 'journal'],
     enabledByDefault: true,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：Systemd 诊断
 
 当用户报告服务管理相关问题时：
@@ -111,6 +123,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['mysql', 'mariadb', '数据库', '慢查询', 'slow query'],
     enabledByDefault: false,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：MySQL 诊断
 
 当用户报告 MySQL 相关问题时：
@@ -132,6 +147,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['redis', '缓存', 'cache'],
     enabledByDefault: false,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：Redis 诊断
 
 当用户报告 Redis 相关问题时：
@@ -153,6 +171,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['安全', 'security', '防火墙', 'firewall', 'ssh', 'audit'],
     enabledByDefault: false,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：安全巡检
 
 当用户要求安全检查时：
@@ -178,6 +199,9 @@ export const BUILTIN_SKILLS: Skill[] = [
     triggerKeywords: ['磁盘', 'disk', '空间', '满', 'full', 'no space'],
     enabledByDefault: true,
     source: 'builtin',
+    scripts: [],
+    references: [],
+    assets: [],
     content: `## 技能：磁盘空间排查
 
 当用户报告磁盘满或空间不足时：

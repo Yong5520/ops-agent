@@ -63,6 +63,21 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   tokenCount?: number;
+  attachments?: MessageAttachment[];
+  createdAt: string;
+}
+
+export interface MessageAttachment {
+  id: string;
+  messageId: string;
+  sessionId: string;
+  type: 'image';
+  filePath: string; // relative path under attachments dir: {sessionId}/{filename}
+  mimeType: string;
+  originalName?: string;
+  sizeBytes: number;
+  width?: number;
+  height?: number;
   createdAt: string;
 }
 

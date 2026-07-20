@@ -61,6 +61,7 @@ const CHANNELS = {
   // Native dialog channels
   DIALOG_SAVE: 'dialog:saveFile',
   DIALOG_OPEN: 'dialog:openFile',
+  DIALOG_OPEN_DIRECTORY: 'dialog:openDirectory',
   // AI command generation
   AI_GENERATE_COMMAND: 'ai:generateCommand',
 } as const;
@@ -537,6 +538,15 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: '选择文件',
       properties: ['openFile'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle(CHANNELS.DIALOG_OPEN_DIRECTORY, async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: '选择文件夹',
+      properties: ['openDirectory'],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];

@@ -1,5 +1,5 @@
-import { contextBridge, ipcRenderer } from 'electron';
-import type { OpsAgentApi } from '../src/main/ipc/preload-api.js';
+import { contextBridge, ipcRenderer, clipboard } from 'electron';
+import type { OpsAgentApi, SkillFileInput } from '../src/main/ipc/preload-api.js';
 
 const api: OpsAgentApi = {
   // System
@@ -80,10 +80,24 @@ const api: OpsAgentApi = {
   skills: {
     list: () => ipcRenderer.invoke('skills:list'),
     getContent: (name: string) => ipcRenderer.invoke('skills:getContent', name),
-    install: (name: string, content: string, description?: string, whenToUse?: string) =>
-      ipcRenderer.invoke('skills:install', name, content, description, whenToUse),
+    install: (
+      name: string,
+      content: string,
+      description?: string,
+      whenToUse?: string,
+      files?: SkillFileInput[],
+    ) => ipcRenderer.invoke('skills:install', name, content, description, whenToUse, files),
     remove: (name: string) => ipcRenderer.invoke('skills:delete', name),
     toggle: (name: string, enabled: boolean) => ipcRenderer.invoke('skills:toggle', name, enabled),
+    listFiles: (name: string) => ipcRenderer.invoke('skills:listFiles', name),
+    readFile: (name: string, filePath: string) =>
+      ipcRenderer.invoke('skills:readFile', name, filePath),
+    writeFile: (name: string, filePath: string, content: string) =>
+      ipcRenderer.invoke('skills:writeFile', name, filePath, content),
+    deleteFile: (name: string, filePath: string) =>
+      ipcRenderer.invoke('skills:deleteFile', name, filePath),
+    importFromDir: (srcPath: string, skillName?: string) =>
+      ipcRenderer.invoke('skills:importFromDir', srcPath, skillName),
   },
 
   // Agent
@@ -174,6 +188,11 @@ const api: OpsAgentApi = {
       ipcRenderer.invoke('tasks:update', sessionId, todos),
   },
 
+  // Attachments (image data reading)
+  attachments: {
+    read: (attachmentId: string) => ipcRenderer.invoke('attachments:read', attachmentId),
+  },
+
   // Terminal (interactive SSH shell + local cmd)
   terminal: {
     start: (hostId: string) => ipcRenderer.invoke('terminal:start', hostId),
@@ -231,6 +250,15 @@ const api: OpsAgentApi = {
     saveFile: (defaultName: string, title?: string) =>
       ipcRenderer.invoke('dialog:saveFile', defaultName, title),
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
+    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+  },
+
+  // Clipboard - uses Electron's synchronous clipboard module. More reliable
+  // than navigator.clipboard, which can reject ("Document is not focused")
+  // after xterm focuses its hidden textarea on right-click.
+  clipboard: {
+    writeText: (text: string) => clipboard.writeText(text),
+    readText: () => clipboard.readText(),
   },
 
   // AI command generation

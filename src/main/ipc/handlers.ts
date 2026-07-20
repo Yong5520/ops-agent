@@ -14,6 +14,8 @@ import { exportSessionToMarkdown } from '../agent/export.js';
 import { clearSummaryCache, compressContext, loadMessages } from '../agent/context.js';
 import { cleanupSessionResults } from '../agent/tool-results.js';
 import { analyzeContextBreakdown } from '../agent/context-breakdown.js';
+import { attachmentsStore } from '../storage/attachments.js';
+import { getDb } from '../storage/database.js';
 import {
   listAllSkills,
   getEnabledSkills,
@@ -21,6 +23,12 @@ import {
   installSkill,
   deleteSkill,
   setSkillEnabled,
+  listSkillFiles,
+  readSkillFile,
+  writeSkillFile,
+  deleteSkillFile,
+  importSkillFromDirectory,
+  type SkillFileInput,
 } from '../agent/skills/index.js';
 import { getActiveModel } from '../agent/providers.js';
 import { connectionPool, execCommand } from '../ssh/index.js';
@@ -196,6 +204,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       hostIds: request.hostIds,
       safetyMode: request.safetyMode,
       maxSteps: request.maxSteps,
+      attachments: request.attachments,
       abortSignal: abortController.signal,
       onTextStream: (text) => {
         win.webContents.send(Channels.Agent.TEXT_STREAM, {
@@ -496,6 +505,9 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       enabled: enabled.has(s.name),
       enabledByDefault: s.enabledByDefault,
       filePath: s.filePath,
+      scriptCount: s.scripts.length,
+      referenceCount: s.references.length,
+      assetCount: s.assets.length,
     }));
   });
 
@@ -505,8 +517,15 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   ipcMain.handle(
     Channels.Skills.INSTALL,
-    async (_e, name: string, content: string, description?: string, whenToUse?: string) => {
-      return installSkill(name, content, description, whenToUse);
+    async (
+      _e,
+      name: string,
+      content: string,
+      description?: string,
+      whenToUse?: string,
+      files?: SkillFileInput[],
+    ) => {
+      return installSkill(name, content, description, whenToUse, files);
     },
   );
 
@@ -518,6 +537,32 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     setSkillEnabled(name, enabled);
   });
 
+  ipcMain.handle(Channels.Skills.LIST_FILES, async (_e, name: string) => {
+    return listSkillFiles(name);
+  });
+
+  ipcMain.handle(Channels.Skills.READ_FILE, async (_e, name: string, filePath: string) => {
+    return readSkillFile(name, filePath);
+  });
+
+  ipcMain.handle(
+    Channels.Skills.WRITE_FILE,
+    async (_e, name: string, filePath: string, content: string) => {
+      return writeSkillFile(name, filePath, content);
+    },
+  );
+
+  ipcMain.handle(Channels.Skills.DELETE_FILE, async (_e, name: string, filePath: string) => {
+    return deleteSkillFile(name, filePath);
+  });
+
+  ipcMain.handle(
+    Channels.Skills.IMPORT_FROM_DIR,
+    async (_e, srcPath: string, skillName?: string) => {
+      return importSkillFromDirectory(srcPath, skillName);
+    },
+  );
+
   // ---------- Tasks (TodoWrite) ----------
   ipcMain.handle(Channels.Tasks.LIST, async (_e, sessionId: string) => {
     return taskListsStore.get(sessionId) ?? [];
@@ -526,6 +571,18 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Tasks.UPDATE, async (_e, sessionId: string, todos: TodoItem[]) => {
     taskListsStore.save(sessionId, todos);
     return { success: true };
+  });
+
+  // ---------- Attachments (image file reading) ----------
+  // Returns a single attachment's image data as a base64 data URL so the
+  // renderer can render it in <img> tags without direct file system access.
+  ipcMain.handle(Channels.Attachments.READ, async (_e, attachmentId: string) => {
+    const db = getDb();
+    const row = db
+      .prepare('SELECT file_path, mime_type FROM message_attachments WHERE id = ?')
+      .get(attachmentId) as { file_path: string; mime_type: string } | undefined;
+    if (!row) return null;
+    return attachmentsStore.readAsDataUrl(row.file_path, row.mime_type);
   });
 
   // ---------- Window ----------

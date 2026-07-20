@@ -52,10 +52,7 @@ const GATHER_COMMAND = [
 // Gather facts for a host. Returns cached data if fresh, otherwise runs
 // the gather command via SSH. Returns null if the host is unreachable or
 // the gather command fails — the system prompt gracefully omits facts.
-export async function gatherHostFacts(
-  hostId: string,
-  hostName: string,
-): Promise<HostFacts | null> {
+export async function gatherHostFacts(hostId: string, hostName: string): Promise<HostFacts | null> {
   const cached = factsCache.get(hostId);
   if (cached && Date.now() - cached.cachedAt < FACTS_TTL_MS) {
     return cached;
@@ -81,13 +78,39 @@ export async function gatherHostFacts(
   }
 }
 
+/**
+ * Return cached host facts if fresh, WITHOUT triggering an SSH round-trip.
+ *
+ * Use this on latency-sensitive paths (e.g. AI command generation) where OS
+ * context is nice-to-have but must never block the caller. Returns null when
+ * the cache is cold or stale - the caller should proceed without facts.
+ */
+export function getCachedHostFacts(hostId: string): HostFacts | null {
+  const cached = factsCache.get(hostId);
+  if (cached && Date.now() - cached.cachedAt < FACTS_TTL_MS) {
+    return cached;
+  }
+  return null;
+}
+
+/**
+ * Kick off a background refresh of host facts without awaiting it.
+ *
+ * Safe to call from non-blocking paths: gatherHostFacts swallows its own
+ * errors and never rejects, so this never throws and never makes the caller
+ * wait. The next getCachedHostFacts call picks up the refreshed entry.
+ */
+export function refreshHostFactsInBackground(hostId: string, hostName: string): void {
+  void gatherHostFacts(hostId, hostName).catch((err) => {
+    logger.warn(`[Facts] Background refresh failed for ${hostName}: ${(err as Error).message}`);
+  });
+}
+
 // Gather facts for multiple hosts in parallel.
 export async function gatherMultipleHostFacts(
   hostIds: Array<{ id: string; name: string }>,
 ): Promise<HostFacts[]> {
-  const results = await Promise.allSettled(
-    hostIds.map((h) => gatherHostFacts(h.id, h.name)),
-  );
+  const results = await Promise.allSettled(hostIds.map((h) => gatherHostFacts(h.id, h.name)));
   return results
     .filter((r): r is PromiseFulfilledResult<HostFacts | null> => r.status === 'fulfilled')
     .map((r) => r.value)
@@ -118,7 +141,10 @@ function parseFacts(output: string, hostId: string, hostName: string): HostFacts
   const prettyNameMatch = osRaw.match(/^PRETTY_NAME="?([^"\n]+)"?/m);
   const os = prettyNameMatch
     ? prettyNameMatch[1]
-    : osRaw.split('\n').find((l) => l.trim())?.trim() || 'unknown';
+    : osRaw
+        .split('\n')
+        .find((l) => l.trim())
+        ?.trim() || 'unknown';
 
   // Failed units: first token of each non-"none" line
   const failedUnits = (sections.FAILED || '')

@@ -1,4 +1,5 @@
 import { getDb } from './database.js';
+import { attachmentsStore } from './attachments.js';
 import type { Session, SessionInput, Message, MessageInput } from '../../shared/types.js';
 
 interface SessionRow {
@@ -138,6 +139,8 @@ export const sessionsStore = {
       db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
     });
     tx();
+    // Clean up image files on disk now that DB rows are gone.
+    attachmentsStore.deleteSessionFiles(id);
   },
 
   // ---------- Messages ----------
@@ -145,7 +148,10 @@ export const sessionsStore = {
     const rows = getDb()
       .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC')
       .all(sessionId) as MessageRow[];
-    return rows.map(rowToMessage);
+    return rows.map(rowToMessage).map((msg) => ({
+      ...msg,
+      attachments: attachmentsStore.listByMessage(msg.id),
+    }));
   },
 
   addMessage(payload: MessageInput): Message {

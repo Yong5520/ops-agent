@@ -23,6 +23,13 @@ import type { AskUserQuestionItem, AskUserAnswer } from '../agent/tools/ask-user
 // Strongly-typed surface exposed to the renderer via contextBridge.
 // The renderer accesses these as `window.opsAgent.*`.
 
+// Image attachment input from the renderer (base64 data URL).
+export interface AgentAttachmentInput {
+  data: string; // base64 data URL: data:image/png;base64,xxxx
+  mimeType: string;
+  originalName?: string;
+}
+
 // ---------- Agent ----------
 export interface AgentRunRequest {
   sessionId: string;
@@ -30,6 +37,7 @@ export interface AgentRunRequest {
   hostIds: string[];
   safetyMode: SafetyMode;
   maxSteps?: number;
+  attachments?: AgentAttachmentInput[];
 }
 
 export interface AgentTextStreamEvent {
@@ -207,6 +215,21 @@ export interface SkillInfo {
   enabled: boolean;
   enabledByDefault: boolean;
   filePath?: string;
+  scriptCount: number;
+  referenceCount: number;
+  assetCount: number;
+}
+
+export interface SkillFileEntry {
+  path: string;
+  category: 'script' | 'reference' | 'asset';
+  size: number;
+  preview: string;
+}
+
+export interface SkillFileInput {
+  path: string;
+  content: string;
 }
 
 export interface OpsAgentApi {
@@ -293,9 +316,25 @@ export interface OpsAgentApi {
       content: string,
       description?: string,
       whenToUse?: string,
+      files?: SkillFileInput[],
     ) => Promise<{ ok: boolean; error?: string }>;
     remove: (name: string) => Promise<{ ok: boolean; error?: string }>;
     toggle: (name: string, enabled: boolean) => Promise<void>;
+    listFiles: (name: string) => Promise<SkillFileEntry[]>;
+    readFile: (
+      name: string,
+      filePath: string,
+    ) => Promise<{ ok: boolean; content?: string; error?: string }>;
+    writeFile: (
+      name: string,
+      filePath: string,
+      content: string,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    deleteFile: (name: string, filePath: string) => Promise<{ ok: boolean; error?: string }>;
+    importFromDir: (
+      srcPath: string,
+      skillName?: string,
+    ) => Promise<{ ok: boolean; error?: string; name?: string }>;
   };
 
   agent: {
@@ -328,6 +367,10 @@ export interface OpsAgentApi {
   tasks: {
     list: (sessionId: string) => Promise<TodoItem[]>;
     update: (sessionId: string, todos: TodoItem[]) => Promise<{ success: boolean }>;
+  };
+
+  attachments: {
+    read: (attachmentId: string) => Promise<string | null>; // base64 data URL
   };
 
   terminal: {
@@ -367,6 +410,12 @@ export interface OpsAgentApi {
   dialog: {
     saveFile: (defaultName: string, title?: string) => Promise<string | null>;
     openFile: () => Promise<string | null>;
+    openDirectory: () => Promise<string | null>;
+  };
+
+  clipboard: {
+    writeText: (text: string) => void;
+    readText: () => string;
   };
 
   ai: {

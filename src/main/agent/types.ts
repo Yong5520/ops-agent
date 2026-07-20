@@ -8,6 +8,13 @@ import type {
 import type { PlanApprovalResult, ModeChangeCallback } from './tools/exit-plan-mode.js';
 import type { AskUserCallback } from './tools/ask-user.js';
 
+// Image attachment input from the renderer (base64 data URL).
+export interface AttachmentInput {
+  data: string; // base64 data URL: data:image/png;base64,xxxx
+  mimeType: string;
+  originalName?: string;
+}
+
 // Agent loop input parameters.
 export interface AgentLoopParams {
   sessionId: string;
@@ -15,6 +22,7 @@ export interface AgentLoopParams {
   hostIds: string[];
   safetyMode: SafetyMode;
   maxSteps?: number;
+  attachments?: AttachmentInput[];
   // When aborted, the loop stops as soon as the current stream step yields.
   abortSignal?: AbortSignal;
   // Streaming callbacks - invoked from the main process to drive the UI.

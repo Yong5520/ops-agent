@@ -10,10 +10,10 @@
 //     with raw HTTP fallback for providers that return non-standard
 //     response shapes (e.g., glm-5.2 thinking blocks without signatures)
 
-import { generateText } from 'ai';
+import { generateText, type LanguageModel } from 'ai';
 import { getActiveModel } from './providers.js';
 import { modelsStore } from '../storage/models.js';
-import { gatherHostFacts } from './facts.js';
+import { getCachedHostFacts, refreshHostFactsInBackground } from './facts.js';
 import { hostsStore } from '../storage/hosts.js';
 import { logger } from '../utils/logger.js';
 
@@ -26,6 +26,50 @@ export interface GeneratedCommand {
 export interface GenerateCommandParams {
   naturalLanguage: string;
   hostId?: string;
+}
+
+// ── In-memory result cache ─────────────────────────────────────────────────
+// Repeat or near-repeat intents return instantly without hitting the model.
+// Keyed by normalized input + OS so the same words on different OSes can
+// yield different commands. Short TTL + size cap keep it from going stale
+// or growing unbounded.
+const COMMAND_CACHE_TTL_MS = 5 * 60 * 1000;
+const COMMAND_CACHE_MAX = 50;
+
+interface CachedCommand {
+  result: GeneratedCommand;
+  cachedAt: number;
+}
+
+const commandCache = new Map<string, CachedCommand>();
+
+function commandCacheKey(naturalLanguage: string, osInfo?: string): string {
+  return `${osInfo ?? 'any'}::${naturalLanguage.trim().toLowerCase()}`;
+}
+
+function getCachedCommand(key: string): GeneratedCommand | null {
+  const entry = commandCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > COMMAND_CACHE_TTL_MS) {
+    commandCache.delete(key);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCachedCommand(key: string, result: GeneratedCommand): void {
+  commandCache.set(key, { result, cachedAt: Date.now() });
+  // Map preserves insertion order - evict the oldest entry past the cap.
+  while (commandCache.size > COMMAND_CACHE_MAX) {
+    const oldestKey = commandCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    commandCache.delete(oldestKey);
+  }
+}
+
+/** Clear the result cache. Exposed for tests. */
+export function clearCommandCache(): void {
+  commandCache.clear();
 }
 
 /**
@@ -97,9 +141,6 @@ ${hostContext}
 用户输入: "统计当前目录大小"
 输出: {"command":"du -sh .","explanation":"du 统计磁盘使用，-s 汇总不显示子目录，-h 人类可读格式(GB/MB)","safetyLevel":"read"}
 
-用户输入: "查看内存使用"
-输出: {"command":"free -h","explanation":"free 显示内存使用情况，-h 以人类可读格式显示","safetyLevel":"read"}
-
 用户输入: "重启 nginx 服务"
 输出: {"command":"sudo systemctl restart nginx","explanation":"systemctl restart 重启服务，sudo 获取 root 权限","safetyLevel":"sudo"}`;
 }
@@ -152,6 +193,53 @@ async function rawAnthropicGenerate(
   return textBlocks.map((b) => b.text!).join('');
 }
 
+// Matches a complete JSON object in the model output. Used to detect
+// truncation: a response with no closing brace is not a complete object and
+// must not be used as-is.
+const JSON_OBJECT_PATTERN = /\{[\s\S]*\}/;
+
+/**
+ * Call the active model for command generation, encapsulating the raw-HTTP
+ * fallback for providers whose thinking blocks fail SDK validation
+ * (e.g. glm-5.2 returns thinking blocks without the `signature` field).
+ */
+async function generateCommandText(
+  model: LanguageModel,
+  systemPrompt: string,
+  naturalLanguage: string,
+  maxTokens: number,
+): Promise<string> {
+  try {
+    const result = await generateText({
+      model,
+      system: systemPrompt,
+      prompt: naturalLanguage,
+      maxTokens,
+      abortSignal: AbortSignal.timeout(20_000),
+    });
+    return result.text;
+  } catch (err) {
+    const errMsg = (err as Error).message || '';
+    if (errMsg.includes('Invalid JSON response') || errMsg.includes('signature')) {
+      logger.warn(`[AI Command] SDK failed (${errMsg.slice(0, 120)}), falling back to raw HTTP`);
+      const provider = modelsStore.getActive();
+      if (!provider || !provider.apiKey) {
+        throw new Error('No active model provider with API key configured');
+      }
+      return rawAnthropicGenerate(
+        { apiKey: provider.apiKey, endpoint: provider.endpoint, modelName: provider.modelName },
+        systemPrompt,
+        naturalLanguage,
+        maxTokens,
+      );
+    }
+    if (errMsg.includes('timeout') || errMsg.includes('Timeout') || errMsg.includes('aborted')) {
+      throw new Error('AI 响应超时（20s），请重试或检查网络与模型端点');
+    }
+    throw err;
+  }
+}
+
 /**
  * Generate a Linux command from natural language input.
  * Uses the active AI model provider.
@@ -167,20 +255,30 @@ export async function generateCommand(params: GenerateCommandParams): Promise<Ge
   let osInfo: string | undefined;
   let kernelInfo: string | undefined;
 
-  // If hostId is provided, gather host facts for context
+  // Use cached facts only - NEVER block on an SSH round-trip for command
+  // generation (it added 0.5-3s of latency on a cold cache). If the cache is
+  // cold, kick off a background refresh so the NEXT call has OS context, but
+  // proceed immediately without it. OS info is a nice-to-have, not essential
+  // for generating a correct command.
   if (hostId) {
     const host = hostsStore.get(hostId);
     if (host) {
-      try {
-        const facts = await gatherHostFacts(hostId, host.name);
-        if (facts) {
-          osInfo = facts.os;
-          kernelInfo = facts.kernel;
-        }
-      } catch (err) {
-        logger.warn(`[AI Command] Failed to gather host facts: ${(err as Error).message}`);
+      const facts = getCachedHostFacts(hostId);
+      if (facts) {
+        osInfo = facts.os;
+        kernelInfo = facts.kernel;
+      } else {
+        refreshHostFactsInBackground(hostId, host.name);
       }
     }
+  }
+
+  // Cache hit? Return the previously generated command instantly.
+  const cacheKey = commandCacheKey(naturalLanguage, osInfo);
+  const cached = getCachedCommand(cacheKey);
+  if (cached) {
+    logger.info(`[AI Command] Cache hit for: "${naturalLanguage.slice(0, 80)}"`);
+    return cached;
   }
 
   const systemPrompt = buildSystemPrompt(osInfo, kernelInfo);
@@ -190,35 +288,26 @@ export async function generateCommand(params: GenerateCommandParams): Promise<Ge
     `[AI Command] Generating command for: "${naturalLanguage.slice(0, 80)}"${hostId ? ` (host: ${hostId})` : ''}`,
   );
 
-  let text: string;
-
-  try {
-    const result = await generateText({
-      model,
-      system: systemPrompt,
-      prompt: naturalLanguage,
-      maxTokens: 1024,
-    });
-    text = result.text;
-  } catch (err) {
-    const errMsg = (err as Error).message || '';
-    // Check if this is the known glm-5.2 thinking signature validation error
-    if (errMsg.includes('Invalid JSON response') || errMsg.includes('signature')) {
-      logger.warn(`[AI Command] SDK failed (${errMsg.slice(0, 120)}), falling back to raw HTTP`);
-      const provider = modelsStore.getActive();
-      if (!provider || !provider.apiKey) {
-        throw new Error('No active model provider with API key configured');
-      }
-      text = await rawAnthropicGenerate(
-        { apiKey: provider.apiKey, endpoint: provider.endpoint, modelName: provider.modelName },
-        systemPrompt,
-        naturalLanguage,
-        1024,
-      );
-    } else {
-      throw err;
-    }
+  // glm-5.2 emits thinking blocks that count against maxTokens. 1024 fits
+  // thinking + the short JSON in the common case (and maxTokens is a cap, not
+  // a target, so it does not slow down the normal response). If the output
+  // still looks truncated (no complete JSON object), retry once with a larger
+  // budget rather than returning a broken command.
+  let text = await generateCommandText(model, systemPrompt, naturalLanguage, 1024);
+  let jsonMatched = JSON_OBJECT_PATTERN.test(text);
+  if (!jsonMatched && text.trim()) {
+    logger.warn(
+      '[AI Command] Response looked truncated (no complete JSON), retrying with larger budget',
+    );
+    text = await generateCommandText(model, systemPrompt, naturalLanguage, 2048);
+    jsonMatched = JSON_OBJECT_PATTERN.test(text);
   }
 
-  return parseCommandResponse(text);
+  const parsed = parseCommandResponse(text);
+  // Only cache cleanly JSON-parsed results - never cache a truncated fallback,
+  // which would poison the cache with a wrong command.
+  if (parsed.command && jsonMatched) {
+    setCachedCommand(cacheKey, parsed);
+  }
+  return parsed;
 }

@@ -42,7 +42,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 6;
+  const targetVersion = 7;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -131,6 +131,27 @@ function runMigrations(database: DB): void {
   if (currentVersion < 6) {
     logger.info(`Running migration v6: add context_window column to model_providers`);
     addColumnIfNotExists(database, 'model_providers', 'context_window', 'INTEGER');
+  }
+
+  if (currentVersion < 7) {
+    logger.info(`Running migration v7: add message_attachments table for multimodal images`);
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        type          TEXT NOT NULL DEFAULT 'image' CHECK (type IN ('image')),
+        file_path     TEXT NOT NULL,
+        mime_type     TEXT NOT NULL,
+        original_name TEXT,
+        size_bytes    INTEGER NOT NULL,
+        width         INTEGER,
+        height        INTEGER,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_attachments_message ON message_attachments(message_id);
+      CREATE INDEX IF NOT EXISTS idx_attachments_session ON message_attachments(session_id);
+    `);
   }
 
   setUserVersion(database, targetVersion);

@@ -102,7 +102,70 @@ describe('buildSystemPrompt - prompt split', () => {
         safetyMode: 'operator',
       });
       expect(staticPrefix).toContain('操作规范');
-      expect(staticPrefix).toContain('先诊断后操作');
+      expect(staticPrefix).toContain('识别用户意图范围');
+    });
+
+    it('contains intent scope awareness rule', () => {
+      const { staticPrefix } = buildSystemPrompt({
+        selectedHostIds: [],
+        safetyMode: 'operator',
+      });
+      expect(staticPrefix).toContain('识别用户意图范围');
+    });
+
+    it('distinguishes analysis-only keywords from action keywords', () => {
+      const { staticPrefix } = buildSystemPrompt({
+        selectedHostIds: [],
+        safetyMode: 'operator',
+      });
+      // Analysis-only keywords
+      expect(staticPrefix).toContain('分析');
+      expect(staticPrefix).toContain('查看');
+      expect(staticPrefix).toContain('检查');
+      // Action keywords
+      expect(staticPrefix).toContain('修复');
+      expect(staticPrefix).toContain('配置');
+      expect(staticPrefix).toContain('安装');
+    });
+
+    it('prohibits WRITE/SUDO for analysis-only requests', () => {
+      const { staticPrefix } = buildSystemPrompt({
+        selectedHostIds: [],
+        safetyMode: 'operator',
+      });
+      // The rule must explicitly prohibit executing writes for analysis-only
+      expect(staticPrefix).toContain('禁止');
+      expect(staticPrefix).toMatch(/分析.*禁止.*WRITE|禁止.*擅自.*执行/);
+    });
+
+    it('requires asking user before fixing when only analysis was requested', () => {
+      const { staticPrefix } = buildSystemPrompt({
+        selectedHostIds: [],
+        safetyMode: 'operator',
+      });
+      // Must mention asking the user (ask_user) when fix is needed but not requested
+      expect(staticPrefix).toContain('ask_user');
+    });
+
+    it('Rule 3 (direct tool call) is conditional on intent', () => {
+      const { staticPrefix } = buildSystemPrompt({
+        selectedHostIds: [],
+        safetyMode: 'operator',
+      });
+      // Rule 3 should mention that direct tool calls apply to operation-type
+      // requests, not analysis-only requests
+      expect(staticPrefix).toMatch(/直接调用工具.*操作|操作.*直接调用工具/);
+    });
+
+    it('Rule 12 (continuous diagnosis) clarifies not to fix after analysis', () => {
+      const { staticPrefix } = buildSystemPrompt({
+        selectedHostIds: [],
+        safetyMode: 'operator',
+      });
+      // Rule 12 should clarify that "continuous diagnosis" means don't stop
+      // mid-diagnosis, NOT continue to fix after analysis is done
+      expect(staticPrefix).toContain('持续诊断');
+      expect(staticPrefix).toMatch(/诊断完成.*停止|不要.*擅自.*修复|不要.*继续.*修复/);
     });
 
     it('contains stable host facts (OS/kernel/CPU/mem) when hostFacts provided', () => {
