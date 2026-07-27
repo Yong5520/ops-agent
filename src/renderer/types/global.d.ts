@@ -28,6 +28,9 @@ interface AgentRunRequest {
   userMessage: string;
   hostIds: string[];
   safetyMode: SafetyMode;
+  // Per-session model override. Undefined = use the session's configured
+  // override (if any), else the global active default.
+  modelProviderId?: string;
   maxSteps?: number;
   attachments?: AgentAttachmentInput[];
 }
@@ -35,6 +38,17 @@ interface AgentRunRequest {
 interface AgentTextStreamEvent {
   sessionId: string;
   text: string;
+}
+
+interface AgentThinkingStreamEvent {
+  sessionId: string;
+  blockId: string;
+  delta?: string;
+  closed?: boolean;
+  durationMs?: number;
+  // > 0 on an open event: retract this many chars of previously-streamed
+  // answer text into this thinking card (qwen stray-closer pattern).
+  absorbPrecedingText?: number;
 }
 
 interface AgentToolCallEvent {
@@ -276,6 +290,10 @@ interface OpsAgentApi {
     remove: (id: string) => Promise<void>;
     setActive: (id: string) => Promise<void>;
     getActive: () => Promise<ModelProvider | null>;
+    testConnection: (
+      input: ModelProviderInput | null,
+      id?: string,
+    ) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
   };
   sessions: {
     list: () => Promise<Session[]>;
@@ -353,6 +371,7 @@ interface OpsAgentApi {
     respondPlanApproval: (response: AgentPlanApprovalResponse) => Promise<void>;
     respondAskUser: (response: AgentAskUserResponse) => Promise<void>;
     onTextStream: (handler: (event: AgentTextStreamEvent) => void) => () => void;
+    onThinkingStream: (handler: (event: AgentThinkingStreamEvent) => void) => () => void;
     onToolCall: (handler: (event: AgentToolCallEvent) => void) => () => void;
     onToolResult: (handler: (event: AgentToolResultEvent) => void) => () => void;
     onAuthorizationRequest: (handler: (event: AgentAuthorizationRequest) => void) => () => void;

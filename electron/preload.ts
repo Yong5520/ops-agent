@@ -29,6 +29,7 @@ const api: OpsAgentApi = {
     remove: (id: string) => ipcRenderer.invoke('models:delete', id),
     setActive: (id: string) => ipcRenderer.invoke('models:setActive', id),
     getActive: () => ipcRenderer.invoke('models:getActive'),
+    testConnection: (input, id?: string) => ipcRenderer.invoke('models:testConnection', input, id),
   },
 
   // Sessions
@@ -118,6 +119,12 @@ const api: OpsAgentApi = {
         handler(event as Parameters<typeof handler>[0]);
       ipcRenderer.on('agent:text-stream', listener);
       return () => ipcRenderer.removeListener('agent:text-stream', listener);
+    },
+    onThinkingStream: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:thinking-stream', listener);
+      return () => ipcRenderer.removeListener('agent:thinking-stream', listener);
     },
     onToolCall: (handler) => {
       const listener = (_e: unknown, event: unknown) =>

@@ -25,6 +25,9 @@ interface SessionStore {
   setHostIds: (hostIds: string[]) => void;
   setSafetyMode: (mode: SafetyMode) => void;
   renameSession: (id: string, title: string) => Promise<void>;
+  // Set (string) or clear (null) the per-session model override. Clearing
+  // reverts the session to the global active default.
+  setSessionModel: (id: string, modelProviderId: string | null) => Promise<void>;
   truncateMessagesAfter: (messageId: string) => Promise<void>;
   addMessage: (msg: Message) => void;
   updateLastAssistant: (content: string) => void;
@@ -127,6 +130,17 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   renameSession: async (id, title) => {
     const updated = await window.opsAgent.sessions.update(id, { title });
+    set({
+      sessions: get().sessions.map((s) => (s.id === id ? updated : s)),
+      currentSession: get().currentSession?.id === id ? updated : get().currentSession,
+    });
+  },
+
+  setSessionModel: async (id, modelProviderId) => {
+    // null clears the override (revert to the global active default). The IPC
+    // layer persists it; the returned Session reflects the new value so the
+    // header updates immediately without a reload.
+    const updated = await window.opsAgent.sessions.update(id, { modelProviderId });
     set({
       sessions: get().sessions.map((s) => (s.id === id ? updated : s)),
       currentSession: get().currentSession?.id === id ? updated : get().currentSession,

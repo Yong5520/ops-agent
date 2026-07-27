@@ -13,6 +13,7 @@ import { useModelStore } from '../../store/modelStore.js';
 import { useHostStore } from '../../store/hostStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
+import { SessionModelSelector } from './SessionModelSelector.js';
 import type { Message } from '../../../shared/types.js';
 
 interface PendingPlanApproval {
@@ -28,11 +29,13 @@ export function ChatPage() {
     safetyMode,
     todos,
     createSession,
+    setSessionModel,
     truncateMessagesAfter,
   } = useSessionStore();
   const {
     isRunning,
-    streamingText,
+    runningSessionId,
+    turnSegments,
     toolCards,
     error,
     contextUsage,
@@ -40,7 +43,7 @@ export function ChatPage() {
     cancelRun,
     clearError,
   } = useAgentStore();
-  const { activeProvider, load: loadModels } = useModelStore();
+  const { activeProvider, providers, load: loadModels } = useModelStore();
   const { hosts, load: loadHosts } = useHostStore();
   const [editFromMessage, setEditFromMessage] = useState<Message | null>(null);
   const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
@@ -481,13 +484,23 @@ export function ChatPage() {
       <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
         {/* Header */}
         <header className="flex items-center justify-between border-b border-zinc-800 px-6 py-3">
-          <div>
-            <h1 className="text-lg font-semibold">
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold">
               {currentSession?.title ?? `会话 ${currentSession?.id.slice(0, 8)}`}
             </h1>
-            <p className="text-xs text-zinc-500">
-              {activeProvider?.name ?? '未配置模型'} · {safetyMode} 模式 · {hostIds.length} 台主机
-            </p>
+            <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+              <SessionModelSelector
+                modelProviderId={currentSession?.modelProviderId}
+                providers={providers}
+                activeProvider={activeProvider}
+                disabled={isRunning && runningSessionId === currentSession?.id}
+                onSelect={(id) => currentSession && setSessionModel(currentSession.id, id)}
+              />
+              <span>·</span>
+              <span>{safetyMode} 模式</span>
+              <span>·</span>
+              <span>{hostIds.length} 台主机</span>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             {contextUsage &&
@@ -541,9 +554,11 @@ export function ChatPage() {
         {/* Messages */}
         <MessageList
           messages={messages}
-          streamingText={streamingText}
+          turnSegments={turnSegments}
           toolCards={toolCards}
           isRunning={isRunning}
+          runningSessionId={runningSessionId}
+          currentSessionId={currentSession?.id}
           onEditMessage={handleEdit}
         />
 

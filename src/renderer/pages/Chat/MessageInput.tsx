@@ -414,7 +414,7 @@ export function MessageInput({
     <div className="relative border-t border-zinc-800 bg-zinc-950 p-4">
       {/* Edit-mode banner */}
       {editFromMessage && (
-        <div className="mx-auto mb-2 flex max-w-3xl items-center justify-between rounded-md border border-amber-800 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-300">
+        <div className="mb-2 flex items-center justify-between rounded-md border border-amber-800 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-300">
           <span>正在编辑历史消息，发送后将替换原消息及之后的回复</span>
           <button
             onClick={() => {
@@ -479,7 +479,7 @@ export function MessageInput({
 
       <div
         className={cn(
-          'mx-auto max-w-3xl rounded-md',
+          'rounded-md',
           isDragging && 'ring-2 ring-blue-500 ring-offset-2 ring-offset-zinc-950 bg-blue-950/20',
         )}
         onDrop={handleDrop}
@@ -574,7 +574,7 @@ export function MessageInput({
           )}
         </div>
       </div>
-      <div className="mx-auto mt-1 max-w-3xl text-xs text-zinc-600">
+      <div className="mt-1 text-xs text-zinc-600">
         {editFromMessage
           ? '编辑模式：发送后原消息及之后的回复会被删除'
           : '快捷命令：$ 或 > 直接执行 SSH 命令 · @ 提及主机 · / 调用技能 · Tab 补全 · 粘贴/拖拽上传截图'}

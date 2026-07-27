@@ -77,10 +77,17 @@ const TOOL_TOKEN_ESTIMATES: Record<string, number> = {
   ask_user: 400,
 };
 
-export function analyzeContextBreakdown(sessionId: string, modelId: string): ContextBreakdown {
-  // Get DB-configured context window if available
-  const activeProvider = modelsStore.getActive();
-  const contextWindow = getContextWindowForModel(modelId, activeProvider?.contextWindow);
+export function analyzeContextBreakdown(
+  sessionId: string,
+  modelId: string,
+  contextWindowOverride?: number,
+): ContextBreakdown {
+  // Context window: caller-provided (the session's resolved provider's window)
+  // wins; otherwise fall back to the global active provider's configured window.
+  // This keeps /context accurate for sessions whose per-session model has a
+  // different context window than the global default.
+  const resolvedContextWindow = contextWindowOverride ?? modelsStore.getActive()?.contextWindow;
+  const contextWindow = getContextWindowForModel(modelId, resolvedContextWindow);
 
   // ── System prompt sections ──────────────────────────────────────────
   const { staticPrefix, dynamicSuffix } = buildSystemPrompt({

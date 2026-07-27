@@ -10,6 +10,10 @@ interface ModelRow {
   api_key: string;
   model_name: string;
   context_window: number | null;
+  input_price_per_mtok: number | null;
+  output_price_per_mtok: number | null;
+  cache_read_price_per_mtok: number | null;
+  cache_creation_price_per_mtok: number | null;
   is_active: number;
   created_at: string;
   updated_at: string;
@@ -24,6 +28,10 @@ function rowToProvider(row: ModelRow, includeSecret = false): ModelProvider {
     apiKey: includeSecret ? decrypt(row.api_key) : undefined,
     modelName: row.model_name,
     contextWindow: row.context_window ?? undefined,
+    inputPricePerMTok: row.input_price_per_mtok ?? undefined,
+    outputPricePerMTok: row.output_price_per_mtok ?? undefined,
+    cacheReadPricePerMTok: row.cache_read_price_per_mtok ?? undefined,
+    cacheCreationPricePerMTok: row.cache_creation_price_per_mtok ?? undefined,
     isActive: row.is_active === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -40,15 +48,13 @@ export const modelsStore = {
 
   get(id: string): ModelProvider | null {
     const row = getDb().prepare('SELECT * FROM model_providers WHERE id = ?').get(id) as
-      | ModelRow
-      | undefined;
+      ModelRow | undefined;
     return row ? rowToProvider(row) : null;
   },
 
   getWithSecret(id: string): ModelProvider | null {
     const row = getDb().prepare('SELECT * FROM model_providers WHERE id = ?').get(id) as
-      | ModelRow
-      | undefined;
+      ModelRow | undefined;
     return row ? rowToProvider(row, true) : null;
   },
 
@@ -65,8 +71,14 @@ export const modelsStore = {
     }
     const db = getDb();
     const stmt = db.prepare(`
-      INSERT INTO model_providers (name, type, endpoint, api_key, model_name, context_window)
-      VALUES (@name, @type, @endpoint, @apiKey, @modelName, @contextWindow)
+      INSERT INTO model_providers
+        (name, type, endpoint, api_key, model_name, context_window,
+         input_price_per_mtok, output_price_per_mtok, cache_read_price_per_mtok,
+         cache_creation_price_per_mtok)
+      VALUES
+        (@name, @type, @endpoint, @apiKey, @modelName, @contextWindow,
+         @inputPricePerMTok, @outputPricePerMTok, @cacheReadPricePerMTok,
+         @cacheCreationPricePerMTok)
       RETURNING *
     `);
     const row = stmt.get({
@@ -76,6 +88,10 @@ export const modelsStore = {
       apiKey: encrypt(payload.apiKey),
       modelName: payload.modelName,
       contextWindow: payload.contextWindow ?? null,
+      inputPricePerMTok: payload.inputPricePerMTok ?? null,
+      outputPricePerMTok: payload.outputPricePerMTok ?? null,
+      cacheReadPricePerMTok: payload.cacheReadPricePerMTok ?? null,
+      cacheCreationPricePerMTok: payload.cacheCreationPricePerMTok ?? null,
     }) as ModelRow;
     return rowToProvider(row);
   },
@@ -99,7 +115,12 @@ export const modelsStore = {
       `
       UPDATE model_providers
       SET name = @name, type = @type, endpoint = @endpoint, api_key = @apiKey,
-          model_name = @modelName, context_window = @contextWindow, updated_at = datetime('now')
+          model_name = @modelName, context_window = @contextWindow,
+          input_price_per_mtok = @inputPricePerMTok,
+          output_price_per_mtok = @outputPricePerMTok,
+          cache_read_price_per_mtok = @cacheReadPricePerMTok,
+          cache_creation_price_per_mtok = @cacheCreationPricePerMTok,
+          updated_at = datetime('now')
       WHERE id = @id
     `,
     ).run({
@@ -110,6 +131,12 @@ export const modelsStore = {
       apiKey: apiKeyStored,
       modelName: payload.modelName ?? existing.modelName,
       contextWindow: payload.contextWindow ?? existing.contextWindow ?? null,
+      inputPricePerMTok: payload.inputPricePerMTok ?? existing.inputPricePerMTok ?? null,
+      outputPricePerMTok: payload.outputPricePerMTok ?? existing.outputPricePerMTok ?? null,
+      cacheReadPricePerMTok:
+        payload.cacheReadPricePerMTok ?? existing.cacheReadPricePerMTok ?? null,
+      cacheCreationPricePerMTok:
+        payload.cacheCreationPricePerMTok ?? existing.cacheCreationPricePerMTok ?? null,
     });
     return this.get(id)!;
   },

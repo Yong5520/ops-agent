@@ -21,12 +21,20 @@ export interface AgentLoopParams {
   userMessage: string;
   hostIds: string[];
   safetyMode: SafetyMode;
+  // Per-session model override. When set, the loop resolves this provider
+  // (with decrypted apiKey) instead of the global active default. Resolution
+  // order: params.modelProviderId -> session.modelProviderId -> global active.
+  modelProviderId?: string;
   maxSteps?: number;
   attachments?: AttachmentInput[];
   // When aborted, the loop stops as soon as the current stream step yields.
   abortSignal?: AbortSignal;
   // Streaming callbacks - invoked from the main process to drive the UI.
   onTextStream: (text: string) => void;
+  // Thinking/reasoning stream - emits structured events so the UI can render
+  // each thinking block as a separate collapsible card. Undefined for
+  // non-thinking models (the parser never opens a block, so no events fire).
+  onThinkingStream?: (event: ThinkingStreamEvent) => void;
   onToolCall: (info: ToolCallInfo) => void;
   onToolResult: (result: ToolCallResult) => void;
   // Authorization callback - async, resolves when user approves/rejects.
@@ -119,6 +127,23 @@ export interface ToolExecutionRecord {
   durationMs?: number;
   outputSummary?: string;
   blockedReason?: string;
+}
+
+// Streaming event for a thinking/reasoning block. The renderer reconstructs
+// blocks by blockId: first sighting opens a block, deltas append content,
+// `closed` finalizes it with a duration.
+export interface ThinkingStreamEvent {
+  blockId: string;
+  // Thinking content delta. Absent on a pure open signal.
+  delta?: string;
+  // True when the block is finalized. durationMs is set alongside it.
+  closed?: boolean;
+  durationMs?: number;
+  // When > 0 (on an open event), this many chars of previously-streamed answer
+  // text were actually reasoning and must be retracted from the text stream
+  // into this thinking block. Happens for stray closers (qwen3.5-27b pattern
+  // where the opening delimiter never reaches the content stream).
+  absorbPrecedingText?: number;
 }
 
 // Context for a single agent loop invocation.

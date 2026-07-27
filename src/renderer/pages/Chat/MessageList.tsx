@@ -1,23 +1,262 @@
 import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message } from '../../../shared/types.js';
-import type { ToolCallCard as ToolCallCardData } from '../../store/agentStore.js';
+import type { ToolCallCard, TurnSegment, ThinkingTurnSegment } from '../../store/agentStore.js';
 import { CommandCard } from '../../components/CommandCard.js';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer.js';
+import { ThinkingBlock as ThinkingBlockView } from '../../components/ThinkingBlock.js';
+import { parseThinkingTags } from '../../lib/parse-thinking-tags.js';
+import {
+  classifyReadVerb,
+  formatToolSummary,
+  type ToolSummaryGroup,
+} from '../../lib/collapse-tool-groups.js';
 
 interface MessageListProps {
   messages: Message[];
-  streamingText: string;
-  toolCards: ToolCallCardData[];
+  turnSegments: TurnSegment[];
+  toolCards: ToolCallCard[];
   isRunning: boolean;
+  // The session whose loop is currently running, and the session currently
+  // displayed. The live-turn overlay only renders when they match, so
+  // switching to a different session mid-run shows that session cleanly
+  // instead of the old run's streaming state overlaid (Issue 3 fix).
+  runningSessionId?: string | null;
+  currentSessionId?: string;
   onEditMessage?: (message: Message) => void;
+}
+
+// A render item is the fully-resolved, interleaved view of one assistant turn:
+// thinking blocks (with any following read-only tools absorbed into their
+// header summary), standalone tool-summary lines, individual non-read tool
+// cards, and answer text - in chronological order.
+type RenderItem =
+  | {
+      kind: 'thinking';
+      content: string;
+      durationMs?: number;
+      streaming: boolean;
+      summary?: string;
+      absorbedTools: ToolCallCard[];
+    }
+  | { kind: 'tool-summary'; summary: string; active: boolean; tools: ToolCallCard[] }
+  | { kind: 'tool'; card: ToolCallCard }
+  | { kind: 'text'; content: string };
+
+// Build render items for the LIVE turn from streamed segments + tool cards.
+// Consecutive READ tools collapse into a summary; each summary attaches to the
+// immediately preceding thinking block (Claude Code "思考 · 搜索了 2 个模式").
+function buildLiveRenderItems(segments: TurnSegment[], toolCards: ToolCallCard[]): RenderItem[] {
+  const cardById = new Map(toolCards.map((c) => [c.toolCallId, c]));
+
+  // Pass 1: resolve tool refs, collapse consecutive READ tools into summaries.
+  type TempItem =
+    | { kind: 'thinking'; seg: ThinkingTurnSegment }
+    | { kind: 'text'; content: string }
+    | { kind: 'tool-summary'; group: ToolSummaryGroup; active: boolean }
+    | { kind: 'tool'; card: ToolCallCard };
+
+  const temp: TempItem[] = [];
+  let current: { group: ToolSummaryGroup; active: boolean } | null = null;
+  const flush = (): void => {
+    if (current && current.group.tools.length > 0) {
+      temp.push({ kind: 'tool-summary', group: current.group, active: current.active });
+    }
+    current = null;
+  };
+
+  for (const seg of segments) {
+    if (seg.kind === 'thinking') {
+      flush();
+      temp.push({ kind: 'thinking', seg });
+    } else if (seg.kind === 'text') {
+      flush();
+      if (seg.content) temp.push({ kind: 'text', content: seg.content });
+    } else {
+      const card = cardById.get(seg.toolCallId);
+      if (!card) continue;
+      if (card.commandType === 'READ') {
+        if (!current) {
+          current = {
+            group: { searchCount: 0, readCount: 0, listCount: 0, tools: [] },
+            active: false,
+          };
+        }
+        const verb = classifyReadVerb(card);
+        if (verb === 'search') current.group.searchCount++;
+        else if (verb === 'list') current.group.listCount++;
+        else current.group.readCount++;
+        current.group.tools.push(card);
+        if (
+          card.status === 'executing' ||
+          card.status === 'pending' ||
+          card.status === 'awaiting-approval'
+        ) {
+          current.active = true;
+        }
+      } else {
+        flush();
+        temp.push({ kind: 'tool', card });
+      }
+    }
+  }
+  flush();
+
+  // Pass 2: attach each tool-summary to the immediately preceding thinking
+  // item; otherwise emit it as a standalone summary line.
+  const result: RenderItem[] = [];
+  for (const item of temp) {
+    if (item.kind === 'tool-summary') {
+      const prev = result[result.length - 1];
+      if (prev && prev.kind === 'thinking' && !prev.summary) {
+        result[result.length - 1] = {
+          ...prev,
+          summary: formatToolSummary(item.group, item.active),
+          absorbedTools: item.group.tools,
+        };
+        continue;
+      }
+      result.push({
+        kind: 'tool-summary',
+        summary: formatToolSummary(item.group, item.active),
+        active: item.active,
+        tools: item.group.tools,
+      });
+    } else if (item.kind === 'thinking') {
+      result.push({
+        kind: 'thinking',
+        content: item.seg.content,
+        durationMs: item.seg.durationMs,
+        streaming: item.seg.streaming,
+        absorbedTools: [],
+      });
+    } else if (item.kind === 'text') {
+      result.push({ kind: 'text', content: item.content });
+    } else {
+      result.push({ kind: 'tool', card: item.card });
+    }
+  }
+  return result;
+}
+
+// Build render items for a PERSISTED assistant message. Thinking blocks come
+// from the message's thinkingBlocks field (or are parsed from <think> tags for
+// legacy rows). Tool calls were not stored per-message, so persisted turns show
+// thinking + text only (no tool summaries) - the live turn has full fidelity.
+function buildPersistedRenderItems(message: Message): RenderItem[] {
+  const items: RenderItem[] = [];
+  const blocks = message.thinkingBlocks ?? [];
+  if (blocks.length > 0) {
+    for (const b of blocks) {
+      if (b.content) {
+        items.push({
+          kind: 'thinking',
+          content: b.content,
+          durationMs: b.durationMs,
+          streaming: false,
+          absorbedTools: [],
+        });
+      }
+    }
+    // content is clean answer text (thinking was captured separately on save)
+    if (message.content) items.push({ kind: 'text', content: message.content });
+  } else {
+    // Legacy row: parse <think> tags inline (preserves order)
+    for (const seg of parseThinkingTags(message.content)) {
+      if (seg.kind === 'thinking') {
+        items.push({
+          kind: 'thinking',
+          content: seg.content,
+          streaming: false,
+          absorbedTools: [],
+        });
+      } else {
+        items.push({ kind: 'text', content: seg.content });
+      }
+    }
+  }
+  return items;
+}
+
+// Renders an ordered list of render items (shared by live + persisted turns).
+function TurnRenderer({ items }: { items: RenderItem[] }) {
+  return (
+    <div className="space-y-1">
+      {items.map((item, i) => {
+        if (item.kind === 'thinking') {
+          return (
+            <ThinkingBlockView
+              key={`t-${i}`}
+              content={item.content}
+              durationMs={item.durationMs}
+              streaming={item.streaming}
+              summary={item.summary}
+              absorbedTools={item.absorbedTools}
+            />
+          );
+        }
+        if (item.kind === 'text') {
+          return <MarkdownRenderer key={`x-${i}`} content={item.content} />;
+        }
+        if (item.kind === 'tool') {
+          return <CommandCard key={item.card.toolCallId} card={item.card} />;
+        }
+        return (
+          <CollapsibleToolSummary
+            key={`s-${i}`}
+            summary={item.summary}
+            active={item.active}
+            tools={item.tools}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// Standalone collapsed read-tool summary (no preceding thought to attach to).
+// Expandable to reveal the individual tool cards.
+function CollapsibleToolSummary({
+  summary,
+  active,
+  tools,
+}: {
+  summary: string;
+  active: boolean;
+  tools: ToolCallCard[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="my-1">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300"
+      >
+        <span className="text-[10px] select-none">{expanded ? '▼' : '▶'}</span>
+        <span>
+          {summary}
+          {active ? '…' : ''}
+        </span>
+      </button>
+      {expanded && (
+        <div className="mt-1 space-y-1">
+          {tools.map((t) => (
+            <CommandCard key={t.toolCallId} card={t} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function MessageList({
   messages,
-  streamingText,
+  turnSegments,
   toolCards,
   isRunning,
+  runningSessionId,
+  currentSessionId,
   onEditMessage,
 }: MessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -49,7 +288,7 @@ export function MessageList({
     setShowScrollToBottom(false);
   }, []);
 
-  // Debounced auto-scroll — only scroll when new content arrives AND user
+  // Debounced auto-scroll - only scroll when new content arrives AND user
   // is already at the bottom. Debouncing prevents layout thrashing during
   // fast streaming output (every 100ms instead of every token).
   useEffect(() => {
@@ -62,9 +301,18 @@ export function MessageList({
     return () => {
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     };
-  }, [messages, streamingText, toolCards]);
+  }, [messages, turnSegments, toolCards]);
 
   const items = virtualizer.getVirtualItems();
+  const liveItems = buildLiveRenderItems(turnSegments, toolCards);
+  // Only show the live-turn overlay for the session that is actually running.
+  // If the user switched to a different session mid-run, show that session's
+  // persisted messages cleanly (the old run keeps streaming in the background
+  // but its state is scoped out of view). Also gate on the running session
+  // being the current one so the overlay doesn't linger after a switch.
+  const isRunningThisSession = isRunning && runningSessionId === currentSessionId;
+  const showLiveTurn = isRunningThisSession || turnSegments.length > 0;
+  const lastItem = liveItems[liveItems.length - 1];
 
   return (
     <div
@@ -72,8 +320,8 @@ export function MessageList({
       onScroll={handleScroll}
       className="relative flex-1 min-h-0 overflow-y-auto"
     >
-      <div className="mx-auto max-w-3xl p-6">
-        {messages.length === 0 && !isRunning && (
+      <div className="p-6">
+        {messages.length === 0 && !isRunningThisSession && (
           <div className="flex h-full flex-col items-center justify-center pt-20 text-center text-zinc-600">
             <div className="text-4xl mb-3">🤖</div>
             <p className="text-sm">开始一段新对话</p>
@@ -118,27 +366,21 @@ export function MessageList({
           </div>
         )}
 
-        {/* Tool call cards (non-virtualized — always visible during run) */}
-        {toolCards.length > 0 && (
-          <div className="space-y-1">
-            {toolCards.map((card) => (
-              <CommandCard key={card.toolCallId} card={card} />
-            ))}
-          </div>
-        )}
-
-        {/* Streaming assistant text */}
-        {streamingText && (
-          <div className="flex justify-end pt-4">
-            <div className="max-w-[85%] rounded-lg rounded-br-sm bg-zinc-800 px-4 py-2.5">
-              <MarkdownRenderer content={streamingText} />
-              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-zinc-400 align-middle" />
+        {/* Live assistant turn (streaming): interleaved thinking/tool/text */}
+        {showLiveTurn && (
+          <div className="flex justify-start pt-4">
+            <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-800 px-4 py-2.5">
+              <div className="mb-1 text-xs text-zinc-500">OpsAgent</div>
+              <TurnRenderer items={liveItems} />
+              {isRunningThisSession && (!lastItem || lastItem.kind === 'text') && (
+                <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-zinc-400 align-middle" />
+              )}
             </div>
           </div>
         )}
 
-        {/* Running indicator */}
-        {isRunning && !streamingText && toolCards.length === 0 && messages.length === 0 && (
+        {/* Running indicator - only when nothing has arrived yet */}
+        {isRunningThisSession && turnSegments.length === 0 && messages.length === 0 && (
           <div className="flex items-center gap-2 text-sm text-zinc-500">
             <span className="flex gap-1">
               <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
@@ -223,13 +465,13 @@ const MessageBubble = memo(function MessageBubble({
           {isUser ? (
             <div className="whitespace-pre-wrap text-sm">{message.content}</div>
           ) : (
-            <MarkdownRenderer content={message.content} />
+            <TurnRenderer items={buildPersistedRenderItems(message)} />
           )}
           {message.attachments && message.attachments.length > 0 && (
             <MessageAttachments attachments={message.attachments} />
           )}
         </div>
-        {/* Edit button on user messages — only when not running */}
+        {/* Edit button on user messages - only when not running */}
         {isUser && canEdit && onEdit && (
           <button
             onClick={() => onEdit(message)}

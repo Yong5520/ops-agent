@@ -11,6 +11,13 @@ interface ModelStore {
   update: (id: string, input: Partial<ModelProviderInput>) => Promise<void>;
   remove: (id: string) => Promise<void>;
   setActive: (id: string) => Promise<void>;
+  // Test a provider config without persisting it. Returns ok + latencyMs on
+  // success, or a friendly error string on failure. Pure IPC call - does not
+  // touch the store's providers state.
+  testConnection: (
+    input: ModelProviderInput | null,
+    id?: string,
+  ) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
 }
 
 export const useModelStore = create<ModelStore>((set, get) => ({
@@ -58,4 +65,6 @@ export const useModelStore = create<ModelStore>((set, get) => ({
     const provider = get().providers.find((p) => p.id === id);
     set({ activeProvider: provider ?? null });
   },
+
+  testConnection: (input, id) => window.opsAgent.models.testConnection(input, id),
 }));

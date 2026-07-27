@@ -36,6 +36,10 @@ export interface AgentRunRequest {
   userMessage: string;
   hostIds: string[];
   safetyMode: SafetyMode;
+  // Per-session model override. Undefined = use the session's configured
+  // override (if any), else the global active default. The chat header
+  // sets this when the user picks a model for the current session.
+  modelProviderId?: string;
   maxSteps?: number;
   attachments?: AgentAttachmentInput[];
 }
@@ -43,6 +47,20 @@ export interface AgentRunRequest {
 export interface AgentTextStreamEvent {
   sessionId: string;
   text: string;
+}
+
+// Streaming event for a thinking/reasoning block. The renderer reconstructs
+// blocks by blockId: first sighting opens a block, `delta` appends content,
+// `closed` finalizes it with `durationMs`.
+export interface AgentThinkingStreamEvent {
+  sessionId: string;
+  blockId: string;
+  delta?: string;
+  closed?: boolean;
+  durationMs?: number;
+  // > 0 on an open event: retract this many chars of previously-streamed
+  // answer text into this thinking card (qwen stray-closer pattern).
+  absorbPrecedingText?: number;
 }
 
 export interface AgentToolCallEvent {
@@ -267,6 +285,10 @@ export interface OpsAgentApi {
     remove: (id: string) => Promise<void>;
     setActive: (id: string) => Promise<void>;
     getActive: () => Promise<ModelProvider | null>;
+    testConnection: (
+      input: ModelProviderInput | null,
+      id?: string,
+    ) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
   };
 
   sessions: {
@@ -352,6 +374,7 @@ export interface OpsAgentApi {
     respondAskUser: (response: AgentAskUserResponse) => Promise<void>;
     // Event listeners (renderer subscribes to main→renderer events)
     onTextStream: (handler: (event: AgentTextStreamEvent) => void) => () => void;
+    onThinkingStream: (handler: (event: AgentThinkingStreamEvent) => void) => () => void;
     onToolCall: (handler: (event: AgentToolCallEvent) => void) => () => void;
     onToolResult: (handler: (event: AgentToolResultEvent) => void) => () => void;
     onAuthorizationRequest: (handler: (event: AgentAuthorizationRequest) => void) => () => void;

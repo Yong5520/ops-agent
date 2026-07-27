@@ -37,6 +37,12 @@ export interface ModelProvider {
   apiKey?: string; // plaintext only in transit; stored encrypted
   modelName: string;
   contextWindow?: number; // optional: user-configured context window size in tokens
+  // Per-million-token pricing (USD) for cost tracking (V3-01). All optional:
+  // when unset, estimated_usd = 0 but token totals are still persisted.
+  inputPricePerMTok?: number;
+  outputPricePerMTok?: number;
+  cacheReadPricePerMTok?: number;
+  cacheCreationPricePerMTok?: number;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -51,11 +57,21 @@ export interface Session {
   hostIds?: string[];
   safetyMode: SafetyMode;
   status: 'active' | 'archived';
+  // Per-session model override. When set, this session runs against the
+  // referenced model_provider row instead of the global active default.
+  // Undefined/null = use the Settings-page active model (the default).
+  modelProviderId?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export type SessionInput = Pick<Session, 'title' | 'hostIds' | 'safetyMode' | 'status'>;
+export type SessionInput = Pick<Session, 'title' | 'hostIds' | 'safetyMode' | 'status'> & {
+  // Per-session model override. A string sets the override; null explicitly
+  // clears it (revert to the global active default). Omitting the key leaves
+  // the existing value untouched. null is used (not undefined) so the clear
+  // signal survives IPC serialization.
+  modelProviderId?: string | null;
+};
 
 export interface Message {
   id: string;
@@ -64,7 +80,22 @@ export interface Message {
   content: string;
   tokenCount?: number;
   attachments?: MessageAttachment[];
+  // Thinking blocks captured separately from the answer text (for reasoning
+  // models like glm-5.2 that emit <think>...</think> or reasoning_content).
+  // Display-only: never sent back to the model. Empty/undefined for
+  // non-thinking models.
+  thinkingBlocks?: ThinkingBlock[];
   createdAt: string;
+}
+
+// A single reasoning/thinking block extracted from the model's output.
+// Rendered as a collapsible "思考 Xm Xs" card in the chat UI.
+export interface ThinkingBlock {
+  id: string;
+  content: string;
+  // Wall-clock duration of the thinking block (endMs - startMs). Undefined
+  // for legacy messages parsed from <think> tags where no timing was recorded.
+  durationMs?: number;
 }
 
 export interface MessageAttachment {
@@ -86,6 +117,9 @@ export interface MessageInput {
   role: Message['role'];
   content: string;
   tokenCount?: number;
+  // Thinking blocks to persist with an assistant message. Undefined for
+  // user/system messages and non-thinking models.
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 // ---------- Audit ----------

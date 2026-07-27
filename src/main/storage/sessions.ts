@@ -1,6 +1,12 @@
 import { getDb } from './database.js';
 import { attachmentsStore } from './attachments.js';
-import type { Session, SessionInput, Message, MessageInput } from '../../shared/types.js';
+import type {
+  Session,
+  SessionInput,
+  Message,
+  MessageInput,
+  ThinkingBlock,
+} from '../../shared/types.js';
 
 interface SessionRow {
   id: string;
@@ -9,6 +15,7 @@ interface SessionRow {
   host_ids: string | null;
   safety_mode: string;
   status: string;
+  model_provider_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -19,6 +26,7 @@ interface MessageRow {
   role: string;
   content: string;
   token_count: number | null;
+  thinking_blocks: string | null;
   created_at: string;
 }
 
@@ -42,9 +50,28 @@ function rowToSession(row: SessionRow): Session {
     hostIds: parseHostIds(row.host_ids),
     safetyMode: row.safety_mode as Session['safetyMode'],
     status: row.status as Session['status'],
+    // NULL in DB -> undefined (use the global active default). A stored id
+    // is returned verbatim; resolution (does it still exist?) happens in
+    // providers.resolveModelProvider at run time.
+    modelProviderId: row.model_provider_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+// Parse the thinking_blocks JSON column. Returns undefined on null/empty/
+// malformed so the field is simply absent on the Message (legacy messages).
+function parseThinkingBlocks(raw: string | null): ThinkingBlock[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed as ThinkingBlock[];
+    }
+  } catch {
+    // malformed JSON - fall through to undefined
+  }
+  return undefined;
 }
 
 function rowToMessage(row: MessageRow): Message {
@@ -54,6 +81,7 @@ function rowToMessage(row: MessageRow): Message {
     role: row.role as Message['role'],
     content: row.content,
     tokenCount: row.token_count ?? undefined,
+    thinkingBlocks: parseThinkingBlocks(row.thinking_blocks),
     createdAt: row.created_at,
   };
 }
@@ -80,8 +108,8 @@ export const sessionsStore = {
     const row = db
       .prepare(
         `
-      INSERT INTO sessions (title, host_id, host_ids, safety_mode, status)
-      VALUES (@title, @hostId, @hostIds, @safetyMode, @status)
+      INSERT INTO sessions (title, host_id, host_ids, safety_mode, status, model_provider_id)
+      VALUES (@title, @hostId, @hostIds, @safetyMode, @status, @modelProviderId)
       RETURNING *
     `,
       )
@@ -93,6 +121,9 @@ export const sessionsStore = {
         hostIds: hostIdsJson,
         safetyMode: payload.safetyMode,
         status: payload.status ?? 'active',
+        // New sessions default to the global active model (NULL) unless the
+        // caller explicitly sets an override.
+        modelProviderId: payload.modelProviderId ?? null,
       }) as SessionRow;
     return rowToSession(row);
   },
@@ -106,12 +137,22 @@ export const sessionsStore = {
     const mergedHostIds = payload.hostIds ?? existing.hostIds;
     const hostIdsJson =
       mergedHostIds && mergedHostIds.length > 0 ? JSON.stringify(mergedHostIds) : null;
+    // Distinguish "key omitted" (keep existing) from "explicitly provided"
+    // (set or clear). null clears the override -> revert to global default.
+    // We can't use payload.modelProviderId ?? existing because null (clear)
+    // is nullish and would fall through to existing. The `in` check is the
+    // only way to tell "clear" apart from "don't touch".
+    const modelProviderId =
+      'modelProviderId' in payload
+        ? (payload.modelProviderId ?? null)
+        : (existing.modelProviderId ?? null);
     db.prepare(
       `
       UPDATE sessions
       SET title = @title, host_id = @hostId, host_ids = @hostIds,
           safety_mode = @safetyMode,
-          status = @status, updated_at = datetime('now')
+          status = @status, model_provider_id = @modelProviderId,
+          updated_at = datetime('now')
       WHERE id = @id
     `,
     ).run({
@@ -121,8 +162,19 @@ export const sessionsStore = {
       hostIds: hostIdsJson,
       safetyMode: payload.safetyMode ?? existing.safetyMode,
       status: payload.status ?? existing.status,
+      modelProviderId,
     });
     return this.getSession(id)!;
+  },
+
+  // Read only the per-session model override id for a session. Used by the
+  // agent loop's resolveModelProvider so it doesn't need to hydrate the full
+  // Session row. Returns undefined when no override is set.
+  getModelProviderId(sessionId: string): string | undefined {
+    const row = getDb()
+      .prepare('SELECT model_provider_id AS id FROM sessions WHERE id = ?')
+      .get(sessionId) as { id: string | null } | undefined;
+    return row?.id ?? undefined;
   },
 
   deleteSession(id: string): void {
@@ -156,11 +208,17 @@ export const sessionsStore = {
 
   addMessage(payload: MessageInput): Message {
     const db = getDb();
+    // Only persist thinking_blocks for assistant messages that have any;
+    // NULL otherwise (keeps rows lean for user/system messages).
+    const thinkingBlocksJson =
+      payload.role === 'assistant' && payload.thinkingBlocks && payload.thinkingBlocks.length > 0
+        ? JSON.stringify(payload.thinkingBlocks)
+        : null;
     const row = db
       .prepare(
         `
-      INSERT INTO messages (session_id, role, content, token_count)
-      VALUES (@sessionId, @role, @content, @tokenCount)
+      INSERT INTO messages (session_id, role, content, token_count, thinking_blocks)
+      VALUES (@sessionId, @role, @content, @tokenCount, @thinkingBlocks)
       RETURNING *
     `,
       )
@@ -169,6 +227,7 @@ export const sessionsStore = {
         role: payload.role,
         content: payload.content,
         tokenCount: payload.tokenCount ?? null,
+        thinkingBlocks: thinkingBlocksJson,
       }) as MessageRow;
     // Bump session updatedAt to surface recent sessions in the list.
     db.prepare(`UPDATE sessions SET updated_at = datetime('now') WHERE id = ?`).run(

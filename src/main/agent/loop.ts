@@ -1,6 +1,6 @@
 import { streamText } from 'ai';
 import type { CoreSystemMessage, CoreMessage } from 'ai';
-import { getActiveModel, validateModelExists } from './providers.js';
+import { createLanguageModel, resolveModelProvider, validateModelExists } from './providers.js';
 import { createTools } from './tools.js';
 import { buildSystemPrompt } from './system-prompt.js';
 import {
@@ -15,6 +15,15 @@ import {
 } from './context.js';
 import { createBudgetTracker, updateBudget } from './token-budget.js';
 import { evaluateStallDecision } from './stall-detection.js';
+import { createThinkingStream } from './thinking-stream.js';
+import { detectRepetition } from './loop-repetition-guard.js';
+import { extractUsage, type ModelPricing } from './cost-tracking.js';
+import { recordSessionCost } from '../storage/cost-store.js';
+import {
+  formatExecutionErrorMessage,
+  isTransientNetworkError,
+  isUnreachableEndpoint,
+} from './model-errors.js';
 import {
   createDenialTracker,
   recordDenial,
@@ -23,11 +32,11 @@ import {
 } from './denial-tracking.js';
 import type { ModeHolder } from './tools/exit-plan-mode.js';
 import { hostsStore } from '../storage/hosts.js';
-import { modelsStore } from '../storage/models.js';
 import { gatherMultipleHostFacts } from './facts.js';
 import { attachmentsStore } from '../storage/attachments.js';
 import { logger } from '../utils/logger.js';
 import type { AgentLoopParams, SessionContext, ToolCallResult } from './types.js';
+import type { ThinkingBlock } from '../../shared/types.js';
 
 // Agent main loop - the core of the application.
 //
@@ -49,6 +58,19 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
 
   // Declare outside try so the catch block can access it for saving partial work
   let fullText = '';
+  // Per-round clean answer text (thinking stripped). Declared at this scope so
+  // the thinking-stream parser's onText callback can append to it via closure;
+  // reset to '' at the start of each stalled round.
+  let roundText = '';
+  // Thinking blocks collected during the run - persisted with the assistant
+  // message. Declared outside try so the catch block can save partial work.
+  const thinkingBlocks: ThinkingBlock[] = [];
+  // Cumulative completion tokens across ALL finish parts in this run (a run can
+  // span multiple streamText calls: tool-call rounds + nudges/continuations).
+  // Persisted to messages.token_count so it reflects the whole assistant turn,
+  // not just the last sub-round. (Per-turn rows in session_costs stay correct
+  // via recordSessionCost, which uses turnUsage for each individual turn.)
+  let cumulativeCompletionTokens = 0;
 
   try {
     // ── 1. Resolve session context ─────────────────────────────────────────
@@ -80,21 +102,23 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       hostFacts,
     });
 
-    // ── 3. Get active model (needed before context compression) ───────────
-    // Pre-flight: validate that the model name exists on the endpoint.
-    // Some proxies (New API) reset the TCP connection (ECONNRESET) instead
-    // of returning a clean HTTP error when the model name is invalid.
-    const activeProvider = modelsStore.getActive();
-    if (activeProvider) {
-      logger.info(
-        `[Agent] Pre-flight check: model="${activeProvider.modelName}" type=${activeProvider.type} endpoint=${activeProvider.endpoint}`,
-      );
-      await validateModelExists(activeProvider);
-    }
-    const model = getActiveModel();
+    // ── 3. Resolve this session's model (needed before context compression) ─
+    // A per-session override (params.modelProviderId or the session's stored
+    // model_provider_id) wins over the global active default. resolveModelProvider
+    // returns the provider row with a decrypted, validated apiKey; createLanguageModel
+    // turns it into a Vercel AI SDK LanguageModel for streamText.
+    const provider = resolveModelProvider(sessionId, params.modelProviderId);
+    logger.info(
+      `[Agent] Pre-flight check: model="${provider.modelName}" type=${provider.type} endpoint=${provider.endpoint}`,
+    );
+    // validateModelExists probes the /models endpoint for openai-compatible /
+    // openai types (no-op for anthropic). Some proxies (New API) reset the TCP
+    // connection (ECONNRESET) on an invalid model name instead of a clean error.
+    await validateModelExists(provider);
+    const model = createLanguageModel(provider);
 
     // Resolve context window: DB-configured > pattern match > default 80k
-    const contextWindow = getContextWindowForModel(model.modelId, activeProvider?.contextWindow);
+    const contextWindow = getContextWindowForModel(model.modelId, provider.contextWindow);
 
     // ── 4. Load + compress message history ─────────────────────────────────
     const history = await compressContext(loadMessages(sessionId), { sessionId, model });
@@ -215,10 +239,68 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     let lastFinishReason = '';
     let stalled = true;
 
+    // Thinking-stream parser - splits <think> tags / reasoning parts out of
+    // the text stream so each thinking block renders as its own collapsible
+    // card. Persisted across nudge rounds so blockIds stay unique within the
+    // turn; roundText is reset per round (above) so the parser's onText
+    // callback always accumulates into the current round's clean text.
+    const thinkingContent = new Map<string, string>();
+    // Repetition guard (qwen loop): set when the streamed output starts
+    // repeating the same phrase. The stream-consumption loop checks this and
+    // breaks out, then we surface a friendly message + abort the model stream.
+    // Wrapped in a mutable ref object so the onText closure can assign to it
+    // and the outer code sees the update (TS control-flow narrowing on a
+    // closure-mutated `let` would otherwise narrow it back to `null`).
+    const repetitionRef: { current: { phrase: string; repeatCount: number } | null } = {
+      current: null,
+    };
+    const thinkingStream = createThinkingStream({
+      onText: (delta) => {
+        roundText += delta;
+        params.onTextStream(delta);
+        // Cheap tail-only scan; only run while no repetition has been seen yet
+        // and the user hasn't cancelled.
+        if (!repetitionRef.current && !abortSignal?.aborted) {
+          const rep = detectRepetition(roundText);
+          if (rep) {
+            repetitionRef.current = rep;
+            logger.warn(
+              `[Agent] Repetition detected (phrase=${rep.phrase.length} chars, ` +
+                `repeated ${rep.repeatCount}x); will abort to avoid a stuck loop`,
+            );
+          }
+        }
+      },
+      onThinkingOpen: (blockId, absorbPrecedingText) => {
+        thinkingContent.set(blockId, '');
+        // Stray-closer absorb (qwen pattern): the reasoning was already
+        // streamed as answer text via onText. Retract it from roundText so
+        // fullText/persistence only keeps the clean answer, and forward the
+        // count so the renderer retracts it from its live text segment into
+        // this thinking card.
+        if (absorbPrecedingText && absorbPrecedingText > 0) {
+          roundText = roundText.slice(0, -absorbPrecedingText);
+        }
+        params.onThinkingStream?.({ blockId, absorbPrecedingText });
+      },
+      onThinkingDelta: (blockId, delta) => {
+        thinkingContent.set(blockId, (thinkingContent.get(blockId) ?? '') + delta);
+        params.onThinkingStream?.({ blockId, delta });
+      },
+      onThinkingClose: (blockId, durationMs) => {
+        const content = thinkingContent.get(blockId) ?? '';
+        // Skip empty thinking blocks so the UI never shows an empty card.
+        if (content) {
+          thinkingBlocks.push({ id: blockId, content, durationMs });
+        }
+        params.onThinkingStream?.({ blockId, closed: true, durationMs });
+      },
+    });
+
     while (stalled) {
       toolCallCount = 0;
       lastFinishReason = '';
-      let roundText = '';
+      roundText = '';
 
       // P0-2: Apply context compaction before each API call
       // Microcompact (truncate large tool results) + Snip (remove old tool results)
@@ -256,15 +338,32 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
               );
               break;
             }
+            // Repetition guard: the model is stuck re-stating the same phrase.
+            // Stop consuming so we don't let it spin to maxSteps. The friendly
+            // message is appended after the loop breaks (below).
+            if (repetitionRef.current) {
+              logger.info(`[Agent] Breaking stream: repetition detected`);
+              break;
+            }
             switch (part.type) {
               case 'text-delta': {
-                const delta = part.textDelta;
-                roundText += delta;
-                params.onTextStream(delta);
+                // Route through the thinking parser: <think>...</think> tags
+                // become thinking blocks, the rest is clean answer text.
+                thinkingStream.feedTextDelta(part.textDelta);
+                break;
+              }
+
+              case 'reasoning': {
+                // SDK reasoning_content (providers that return reasoning as a
+                // separate field). Appends to the current thinking block.
+                thinkingStream.feedReasoningDelta(part.textDelta);
                 break;
               }
 
               case 'tool-call': {
+                // Close any open thinking block so this tool attaches to the
+                // preceding thought in the UI's chronological transcript.
+                thinkingStream.closeCurrent();
                 toolCallCount++;
                 break;
               }
@@ -281,6 +380,17 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
                 }
                 logger.error(`[Agent] Stream error: ${err.message}`);
 
+                // Fix B: connect-timeout / connection-refused means the host
+                // is dead. Skip the retry cycle (which would waste ~2 min) and
+                // surface the error immediately. Retrying a dead endpoint is
+                // pointless - the user needs to fix connectivity, not wait.
+                if (isUnreachableEndpoint(err)) {
+                  logger.warn(
+                    `[Agent] Endpoint unreachable (${err.message.slice(0, 80)}), failing fast without retry`,
+                  );
+                  throw err;
+                }
+
                 // Check if this is a transient network error worth retrying
                 const isTransient = isTransientNetworkError(err);
                 if (isTransient && apiRetryCount < MAX_API_RETRIES) {
@@ -296,13 +406,18 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
                 if (!roundText && !fullText) {
                   throw err;
                 }
-                // Partial text exists: inline the error so the user sees the
-                // response was truncated, instead of silently completing.
-                roundText += `\n\n---\n\u26a0\ufe0f \u54cd\u5e94\u4e2d\u65ad: ${err.message}`;
+                // Partial text exists: inline the tagged error so the user
+                // sees the response was truncated AND where the failure came
+                // from (\u6a21\u578b\u5f02\u5e38 vs \u6267\u884c\u5f02\u5e38), instead of silently completing.
+                roundText += `\n\n---\n${formatExecutionErrorMessage(err)}\n\uff08\u54cd\u5e94\u4e2d\u65ad\uff09`;
                 break;
               }
 
               case 'finish': {
+                // Finalize any thinking block left open at the end of this
+                // streamText call (model stopped mid-think, or trailing think
+                // with no closing tag).
+                thinkingStream.closeCurrent();
                 const reason = part.finishReason;
                 lastFinishReason = reason;
                 // Track token usage for budget decisions (P0-3.3)
@@ -328,6 +443,31 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
                     totalTokens: contextWindow,
                     percentage: Math.min(percentage, 100),
                   });
+                }
+                // V3-01: cost & token tracking. extractUsage normalizes the
+                // finish part's usage + providerMetadata (Anthropic cache tokens)
+                // into a flat record; recordSessionCost persists one
+                // session_costs row per turn + estimated USD from the provider's
+                // pricing. Token accounting persists even when pricing is unset.
+                const turnUsage = extractUsage(part);
+                if (turnUsage) {
+                  // Accumulate completion tokens across all sub-rounds so the
+                  // persisted messages.token_count reflects the full turn.
+                  cumulativeCompletionTokens += turnUsage.completionTokens;
+                  const pricing: ModelPricing = {
+                    inputPricePerMTok: provider.inputPricePerMTok,
+                    outputPricePerMTok: provider.outputPricePerMTok,
+                    cacheReadPricePerMTok: provider.cacheReadPricePerMTok,
+                    cacheCreationPricePerMTok: provider.cacheCreationPricePerMTok,
+                  };
+                  try {
+                    recordSessionCost(sessionId, turnUsage, pricing, provider.id);
+                  } catch (costErr) {
+                    // Cost persistence must never break the agent loop - log only.
+                    logger.warn(
+                      `[Agent] Failed to record session cost: ${(costErr as Error).message}`,
+                    );
+                  }
                 }
                 logger.info(
                   `[Agent] Loop finished: reason=${reason}, tokens=${part.usage?.totalTokens ?? 'unknown'}, totalUsed=${budgetTracker.totalTokensUsed}`,
@@ -383,17 +523,31 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
         }
       }
 
-      // If we exhausted retries without success, surface the error
+      // If we exhausted retries without success, surface a tagged error so
+      // the user sees this as a model\u5f02\u5e38 (connection), not a raw exception.
       if (!streamConsumedSuccessfully && !roundText && !fullText) {
-        throw new Error(
+        const retryErr = new Error(
           `\u65e0\u6cd5\u8fde\u63a5\u6a21\u578b API\uff0c\u5df2\u91cd\u8bd5 ${MAX_API_RETRIES} \u6b21\u5747\u5931\u8d25\u3002\u8bf7\u68c0\u67e5\u6a21\u578b\u670d\u52a1\u662f\u5426\u6b63\u5e38\u8fd0\u884c\u3002`,
         );
+        throw new Error(formatExecutionErrorMessage(retryErr));
       }
 
       // If result is null (shouldn't happen, but TS safety), break
       if (!result) {
         stalled = false;
         break;
+      }
+
+      // Repetition guard fired: surface a friendly message instead of letting
+      // the model spin to maxSteps. End the loop (no nudge).
+      if (repetitionRef.current) {
+        const rep = repetitionRef.current;
+        const note = `\n\n---\n⚠️ 检测到模型输出重复（“${rep.phrase.slice(0, 40)}…”重复 ${rep.repeatCount} 次），已自动停止以避免死循环。这通常是思考型模型在工具调用上的限制。建议重新描述任务或切换模型。`;
+        roundText += note;
+        params.onTextStream(note);
+        fullText += roundText;
+        stalled = false;
+        continue;
       }
 
       fullText += roundText;
@@ -511,8 +665,18 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     }
 
     // ── 7. Save assistant message ──────────────────────────────────────────
+    // Final safety close for any thinking block left open (e.g. loop exited
+    // via a path that didn't hit the finish handler).
+    thinkingStream.closeCurrent();
     if (fullText) {
-      saveAssistantMessage(sessionId, fullText);
+      // Persist cumulative completion tokens across all sub-rounds of this turn
+      // (tool-call rounds + nudges/continuations), not just the last finish.
+      saveAssistantMessage(
+        sessionId,
+        fullText,
+        thinkingBlocks,
+        cumulativeCompletionTokens > 0 ? cumulativeCompletionTokens : undefined,
+      );
     }
 
     // ── 8. Complete ────────────────────────────────────────────────────────
@@ -525,9 +689,13 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // AbortError surfacing from streamText - treat as clean cancellation.
     if (error.name === 'AbortError' || abortSignal?.aborted) {
       logger.info(`[Agent] Loop aborted via AbortError; partial text preserved by caller`);
-      // Save partial text even on abort so the work isn't lost
+      // Save partial text even on abort so the work isn't lost. If no partial
+      // text was produced, save a cancellation marker so the aborted turn is
+      // closed in history (same orphan-message prevention as the failure path).
       if (fullText) {
-        saveAssistantMessage(sessionId, fullText);
+        saveAssistantMessage(sessionId, fullText, thinkingBlocks);
+      } else {
+        saveAssistantMessage(sessionId, '已取消。未执行任何操作。', []);
       }
       return;
     }
@@ -536,62 +704,25 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // Save partial assistant message so executed tool calls aren't lost.
     // The agent may have completed several steps before the error occurred.
     if (fullText) {
-      const errorNote = `\n\n---\n\u26a0\ufe0f \u6267\u884c\u8fc7\u7a0b\u4e2d\u53d1\u751f\u9519\u8bef\uff0c\u5df2\u4fdd\u5b58\u5f53\u524d\u8fdb\u5ea6\u3002\u9519\u8bef\u4fe1\u606f: ${error.message}`;
+      // Tag the error so the user sees WHERE the failure came from (\u6a21\u578b\u5f02\u5e38 vs
+      // \u6267\u884c\u5f02\u5e38) instead of a raw exception string.
+      const errorNote = `\n\n---\n${formatExecutionErrorMessage(error)}\n\u5df2\u4fdd\u5b58\u5f53\u524d\u8fdb\u5ea6\u3002`;
       fullText += errorNote;
-      saveAssistantMessage(sessionId, fullText);
+      saveAssistantMessage(sessionId, fullText, thinkingBlocks);
       // Call onComplete instead of onError so the renderer treats it as a
       // completed (but partial) message, preserving the conversation flow.
       params.onComplete(fullText);
     } else {
-      const friendly = formatModelError(error);
-      params.onError(new Error(`${friendly}\n\n\u8be6\u7ec6\u4fe1\u606f: ${error.message}`));
+      // No partial text was produced (the failure happened before/during the
+      // first streamText call). Save a "failure marker" assistant message so
+      // the failed turn is CLOSED in conversation history - otherwise the
+      // unanswered user message becomes an orphan that the model treats as a
+      // pending task on the NEXT turn, causing it to re-run the failed task
+      // instead of answering the new question (context pollution).
+      const friendly = formatExecutionErrorMessage(error);
+      const failureMarker = `${friendly}\n\n\u672a\u6267\u884c\u4efb\u4f55\u64cd\u4f5c\u3002\u8bf7\u5728\u6392\u67e5\u95ee\u9898\u540e\u91cd\u65b0\u63d0\u95ee\u3002`;
+      saveAssistantMessage(sessionId, failureMarker, []);
+      params.onError(new Error(friendly));
     }
   }
-}
-
-// Format model API errors into user-friendly messages.
-// Uses word-boundary regex for HTTP status codes to avoid false matches
-// inside request IDs or hex strings (e.g., "02178412064429246d1ea..." contains "429").
-function formatModelError(err: Error): string {
-  const msg = err.message;
-  if (msg.includes('Unauthorized') || msg.includes('invalid api key') || /\b401\b/.test(msg)) {
-    return '\u6a21\u578b API Key \u65e0\u6548\u6216\u5df2\u8fc7\u671f\u3002\u8bf7\u5728\u8bbe\u7f6e\u9875\u68c0\u67e5\u6a21\u578b\u914d\u7f6e\u3002';
-  }
-  if (msg.includes('rate limit') || msg.includes('Rate limit') || /\b429\b/.test(msg)) {
-    return '\u6a21\u578b API \u8bf7\u6c42\u9891\u7387\u8d85\u9650\u3002\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u68c0\u67e5 API \u914d\u989d\u3002';
-  }
-  if (msg.includes('specified action is invalid') || msg.includes('invalid action')) {
-    return '\u6a21\u578b API \u7aef\u70b9\u8def\u5f84\u9519\u8bef\u3002\u8bf7\u68c0\u67e5\u7aef\u70b9 URL \u662f\u5426\u6b63\u786e\u3002OpenAI \u517c\u5bb9\u6a21\u578b\u5e94\u4f7f\u7528 /api/v3 \u7ed3\u5c3e\uff08\u4e0d\u5305\u542b /responses\uff09\u3002';
-  }
-  if (/\b50[023]\b/.test(msg)) {
-    return '\u6a21\u578b\u670d\u52a1\u7aef\u9519\u8bef\u3002\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002';
-  }
-  if (
-    msg.includes('ECONNREFUSED') ||
-    msg.includes('ECONNRESET') ||
-    msg.includes('fetch failed') ||
-    msg.includes('Cannot connect to API')
-  ) {
-    return '\u65e0\u6cd5\u8fde\u63a5\u6a21\u578b API \u7aef\u70b9\u3002\u8fd9\u901a\u5e38\u662f\u7531\u4e8e\u7aef\u70b9 URL \u4e0d\u6b63\u786e\u3001\u6a21\u578b\u540d\u79f0\u4e0d\u5b58\u5728\u3001\u6216\u7f51\u7edc\u4e0d\u901a\u5bfc\u81f4\u3002\u8bf7\u5728\u8bbe\u7f6e\u9875\u68c0\u67e5\u6a21\u578b\u914d\u7f6e\u5e76\u70b9\u51fb\u201c\u6d4b\u8bd5\u8fde\u63a5\u201d\u3002';
-  }
-  if (msg.includes('No active model provider')) {
-    return '\u672a\u914d\u7f6e\u6d3b\u8dc3\u6a21\u578b\u4f9b\u5e94\u5546\u3002\u8bf7\u5148\u5728\u8bbe\u7f6e\u9875\u914d\u7f6e\u6a21\u578b\u3002';
-  }
-  return msg;
-}
-
-// Check if an error is a transient network error worth auto-retrying.
-// ECONNRESET, ETIMEDOUT, EPIPE, etc. are typically temporary and benefit
-// from a short delay + retry, especially with local/self-hosted models.
-function isTransientNetworkError(err: Error): boolean {
-  const msg = err.message;
-  if (msg.includes('ECONNRESET')) return true;
-  if (msg.includes('ETIMEDOUT')) return true;
-  if (msg.includes('EPIPE')) return true;
-  if (msg.includes('ECONNREFUSED')) return true;
-  if (msg.includes('fetch failed')) return true;
-  if (msg.includes('socket hang up')) return true;
-  if (msg.includes('network')) return true;
-  if (msg.includes('Failed after') && msg.includes('attempts')) return true;
-  return false;
 }

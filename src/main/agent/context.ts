@@ -8,6 +8,12 @@ import { logger } from '../utils/logger.js';
 import { microcompactToolResults } from './compaction/microcompact.js';
 import { snipCompactIfNeeded } from './compaction/snip.js';
 import type { AttachmentInput } from './types.js';
+import type { ThinkingBlock } from '../../shared/types.js';
+
+// Matches a <think>...</think> block (non-greedy, dot-all). Used to strip raw
+// thinking tags from legacy assistant messages before sending them back to the
+// model - the model should not see its own past thinking as literal text.
+const THINK_TAG_PATTERN = /<think>[\s\S]*?<\/think>/g;
 
 // Context manager — handles message history loading, format conversion,
 // and summary compression for the agent loop.
@@ -149,9 +155,15 @@ export function loadMessages(sessionId: string): CoreMessage[] {
           paths: m.attachments.map((a) => a.filePath),
         });
       }
+      // Assistant messages: strip any <think> tags from legacy content (rows
+      // saved before thinking was captured separately). New rows store clean
+      // content + thinkingBlocks, so this is a no-op for them. Thinking blocks
+      // themselves are display-only and never sent back to the model.
+      const content =
+        m.role === 'assistant' ? m.content.replace(THINK_TAG_PATTERN, '').trim() : m.content;
       return {
         role: m.role as 'user' | 'assistant',
-        content: m.content,
+        content,
       };
     });
 
@@ -188,8 +200,13 @@ export function saveUserMessage(sessionId: string, content: string): string {
   return msg.id;
 }
 
-export function saveAssistantMessage(sessionId: string, content: string): void {
-  sessionsStore.addMessage({ sessionId, role: 'assistant', content });
+export function saveAssistantMessage(
+  sessionId: string,
+  content: string,
+  thinkingBlocks?: ThinkingBlock[],
+  tokenCount?: number,
+): void {
+  sessionsStore.addMessage({ sessionId, role: 'assistant', content, thinkingBlocks, tokenCount });
 }
 
 // ── Token estimation ───────────────────────────────────────────────────────

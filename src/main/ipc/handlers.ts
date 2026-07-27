@@ -30,7 +30,12 @@ import {
   importSkillFromDirectory,
   type SkillFileInput,
 } from '../agent/skills/index.js';
-import { getActiveModel } from '../agent/providers.js';
+import {
+  createLanguageModel,
+  resolveModelProvider,
+  resolveTestTarget,
+  testProviderConnection,
+} from '../agent/providers.js';
 import { connectionPool, execCommand } from '../ssh/index.js';
 import { registerTerminalHandlers, closeAllTerminals } from './terminal.js';
 import type { AuthorizationResponse } from '../agent/types.js';
@@ -40,7 +45,7 @@ import type {
   AgentPlanApprovalResponse,
   AgentAskUserResponse,
 } from './preload-api.js';
-import type { TodoItem } from '../../shared/types.js';
+import type { TodoItem, ModelProviderInput } from '../../shared/types.js';
 import type { PlanApprovalResult } from '../agent/tools/exit-plan-mode.js';
 import type { AskUserAnswer } from '../agent/tools/ask-user.js';
 
@@ -116,6 +121,39 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Models.DELETE, async (_e, id: string) => modelsStore.delete(id));
   ipcMain.handle(Channels.Models.SET_ACTIVE, async (_e, id: string) => modelsStore.setActive(id));
   ipcMain.handle(Channels.Models.GET_ACTIVE, async () => modelsStore.getActive());
+  // Test a provider config without saving it. Accepts the form input and an
+  // optional id (for the edit flow, where a blank apiKey falls back to the
+  // stored key via resolveTestProvider). Never throws - returns {ok,error}.
+  //
+  // CRITICAL: read the stored row via getWithSecret(id), NOT get(id). get()
+  // strips the apiKey (secrets are kept out of the renderer-facing layer);
+  // getWithSecret() decrypts it. Using get() here caused "API key is missing"
+  // failures on the test button even though chat worked (chat uses
+  // getActive(), which also decrypts).
+  ipcMain.handle(
+    Channels.Models.TEST_CONNECTION,
+    async (_e, input: ModelProviderInput | null, id?: string) => {
+      try {
+        const stored = id ? modelsStore.getWithSecret(id) : null;
+        const toTest = resolveTestTarget(input, stored);
+        if (!toTest) {
+          return {
+            ok: false,
+            error: '未提供 API Key，且未找到已保存的配置。请填写 API Key 后重试。',
+          };
+        }
+        if (!toTest.apiKey) {
+          return {
+            ok: false,
+            error: '未配置 API Key。请在编辑模型时填写 API Key 后保存，再测试连接。',
+          };
+        }
+        return await testProviderConnection(toTest);
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    },
+  );
 
   // ---------- Sessions ----------
   ipcMain.handle(Channels.Sessions.LIST, async () => sessionsStore.listSessions());
@@ -203,6 +241,8 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       userMessage: request.userMessage,
       hostIds: request.hostIds,
       safetyMode: request.safetyMode,
+      // Per-session model override (undefined = use session/global default).
+      modelProviderId: request.modelProviderId,
       maxSteps: request.maxSteps,
       attachments: request.attachments,
       abortSignal: abortController.signal,
@@ -210,6 +250,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         win.webContents.send(Channels.Agent.TEXT_STREAM, {
           sessionId: request.sessionId,
           text,
+        });
+      },
+      onThinkingStream: (event) => {
+        win.webContents.send(Channels.Agent.THINKING_STREAM, {
+          sessionId: request.sessionId,
+          ...event,
         });
       },
       onToolCall: (info) => {
@@ -417,7 +463,20 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         messageCount: messages.length,
       };
     }
-    const model = getActiveModel();
+    // Per-session override wins over the global default (same resolution as
+    // the agent loop). resolveModelProvider throws when no model is configured;
+    // map that to the 'no_model' result the renderer already handles (and which
+    // the previous getActiveModel() throw never actually reached).
+    const model = (() => {
+      try {
+        return createLanguageModel(resolveModelProvider(sessionId));
+      } catch (err) {
+        logger.warn(
+          `[Agent] Compact aborted - no model for session ${sessionId}: ${(err as Error).message}`,
+        );
+        return null;
+      }
+    })();
     if (!model) {
       return { ok: false, reason: 'no_model' };
     }
@@ -442,9 +501,23 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   // ---------- Context: Breakdown (/context command) ----------
   ipcMain.handle(Channels.Agent.GET_CONTEXT, async (_e, sessionId: string) => {
-    const model = getActiveModel();
-    const modelId = model?.modelId ?? 'unknown';
-    return analyzeContextBreakdown(sessionId, modelId);
+    // Resolve the session's model (per-session override -> global default).
+    // If none is configured, resolveModelProvider throws - fall back to an
+    // 'unknown' model with no context-window override so /context still shows
+    // a breakdown rather than an IPC rejection (renderer expects an object).
+    let modelId = 'unknown';
+    let contextWindowOverride: number | undefined;
+    try {
+      const provider = resolveModelProvider(sessionId);
+      const model = createLanguageModel(provider);
+      modelId = model.modelId;
+      contextWindowOverride = provider.contextWindow;
+    } catch (err) {
+      logger.warn(
+        `[Agent] /context for session ${sessionId} - no model: ${(err as Error).message}`,
+      );
+    }
+    return analyzeContextBreakdown(sessionId, modelId, contextWindowOverride);
   });
 
   // ---------- Quick Command (> / $ prefix) ----------

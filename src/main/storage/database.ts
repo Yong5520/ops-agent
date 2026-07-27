@@ -7,7 +7,6 @@ import { SCHEMA_STATEMENTS } from './schema.js';
 import { verifyCrypto } from './crypto.js';
 
 export type DB = Database.Database;
-
 let db: DB | null = null;
 
 function resolveDbPath(): string {
@@ -42,7 +41,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 7;
+  const targetVersion = 11;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -152,6 +151,75 @@ function runMigrations(database: DB): void {
       CREATE INDEX IF NOT EXISTS idx_attachments_message ON message_attachments(message_id);
       CREATE INDEX IF NOT EXISTS idx_attachments_session ON message_attachments(session_id);
     `);
+  }
+
+  if (currentVersion < 8) {
+    logger.info(`Running migration v8: add thinking_blocks column to messages`);
+    // JSON array of ThinkingBlock ({ id, content, durationMs? }). NULL for
+    // non-thinking models and legacy messages (parsed from <think> tags at
+    // render time in that case).
+    addColumnIfNotExists(database, 'messages', 'thinking_blocks', 'TEXT');
+  }
+
+  if (currentVersion < 9) {
+    // v9 was reserved for sessions.model_provider_id (per-session model
+    // switching). An earlier interrupted session bumped targetVersion to 9
+    // WITHOUT adding this block, so DBs that ran in that state are now at
+    // user_version=9 but lack the column. The v10 block below re-adds it
+    // idempotently (addColumnIfNotExists checks PRAGMA table_info), so this
+    // v9 block is intentionally a no-op - kept only so the version gap is
+    // documented. The real work happens in v10.
+    logger.info(`Running migration v9: (reserved) sessions.model_provider_id`);
+  }
+
+  if (currentVersion < 10) {
+    // Per-session model override. Nullable: NULL means "use the global
+    // active default". ON DELETE SET NULL so deleting a provider resets
+    // affected sessions to the default instead of orphaning them.
+    // Idempotent (addColumnIfNotExists) so this also repairs DBs that were
+    // bumped to v9 without the column by the interrupted session.
+    logger.info(`Running migration v10: add model_provider_id to sessions`);
+    addColumnIfNotExists(
+      database,
+      'sessions',
+      'model_provider_id',
+      'TEXT REFERENCES model_providers(id) ON DELETE SET NULL',
+    );
+    // Defense-in-depth: also (re)add thinking_blocks to messages. A v9 DB
+    // created by the interrupted session would have run the v8 block, so this
+    // is normally a no-op - but addColumnIfNotExists is idempotent and costs
+    // nothing, and it guards against any DB that reached v9 without the column
+    // (which would otherwise break INSERT INTO messages (... thinking_blocks)).
+    addColumnIfNotExists(database, 'messages', 'thinking_blocks', 'TEXT');
+  }
+
+  if (currentVersion < 11) {
+    // V3-01: cost & token tracking. session_costs table (one row per agent
+    // turn) + per-million-token pricing columns on model_providers (editable
+    // in Settings, all nullable so existing providers default to "no pricing"
+    // -> estimated_usd = 0, tokens still persisted). Both additive and
+    // idempotent - safe on fresh installs (table already created by the v1
+    // SCHEMA_STATEMENTS) and on upgraded DBs.
+    logger.info(`Running migration v11: session_costs table + model_providers pricing`);
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS session_costs (
+        id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id             TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        model_provider_id      TEXT REFERENCES model_providers(id) ON DELETE SET NULL,
+        prompt_tokens          INTEGER NOT NULL DEFAULT 0,
+        completion_tokens      INTEGER NOT NULL DEFAULT 0,
+        total_tokens           INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
+        estimated_usd          REAL NOT NULL DEFAULT 0,
+        created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_costs_session ON session_costs(session_id, created_at);
+    `);
+    addColumnIfNotExists(database, 'model_providers', 'input_price_per_mtok', 'REAL');
+    addColumnIfNotExists(database, 'model_providers', 'output_price_per_mtok', 'REAL');
+    addColumnIfNotExists(database, 'model_providers', 'cache_read_price_per_mtok', 'REAL');
+    addColumnIfNotExists(database, 'model_providers', 'cache_creation_price_per_mtok', 'REAL');
   }
 
   setUserVersion(database, targetVersion);

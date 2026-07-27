@@ -24,6 +24,7 @@ export const Channels = {
     DELETE: 'models:delete',
     SET_ACTIVE: 'models:setActive',
     GET_ACTIVE: 'models:getActive',
+    TEST_CONNECTION: 'models:testConnection',
   },
   Sessions: {
     LIST: 'sessions:list',
@@ -79,6 +80,7 @@ export const Channels = {
     QUICK_COMMAND: 'agent:quick-command',
     // Events: main -> renderer (via webContents.send)
     TEXT_STREAM: 'agent:text-stream',
+    THINKING_STREAM: 'agent:thinking-stream',
     TOOL_CALL: 'agent:tool-call',
     TOOL_RESULT: 'agent:tool-result',
     AUTHORIZATION_REQUEST: 'agent:authorization-request',

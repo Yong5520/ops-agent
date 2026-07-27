@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   host_ids    TEXT,
   safety_mode TEXT NOT NULL DEFAULT 'operator' CHECK (safety_mode IN ('sentinel', 'operator', 'autopilot', 'plan')),
   status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  model_provider_id TEXT REFERENCES model_providers(id) ON DELETE SET NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -49,12 +50,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, updated_at);
 
 -- 4.4 消息
 CREATE TABLE IF NOT EXISTS messages (
-  id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  role        TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
-  content     TEXT NOT NULL,
-  token_count INTEGER,
-  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  id              TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content         TEXT NOT NULL,
+  token_count     INTEGER,
+  thinking_blocks TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
 
@@ -141,4 +143,19 @@ CREATE TABLE IF NOT EXISTS hooks (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_hooks_event ON hooks(event, enabled);
+
+-- 4.11 Session cost & token usage (V3-01). One row per agent turn.
+CREATE TABLE IF NOT EXISTS session_costs (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id             TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  model_provider_id      TEXT REFERENCES model_providers(id) ON DELETE SET NULL,
+  prompt_tokens          INTEGER NOT NULL DEFAULT 0,
+  completion_tokens      INTEGER NOT NULL DEFAULT 0,
+  total_tokens           INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
+  estimated_usd          REAL NOT NULL DEFAULT 0,
+  created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_session_costs_session ON session_costs(session_id, created_at);
 `;
