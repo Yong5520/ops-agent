@@ -4,6 +4,7 @@ import { connectionPool, execCommand, sudoExecCommand, readFile, writeFile } fro
 import { hostsStore } from '../storage/hosts.js';
 import { auditStore } from '../storage/audit.js';
 import { hooksStore } from '../storage/hooks.js';
+import { getSessionCostTotal } from '../storage/cost-store.js';
 import { getEffectiveConfig, checkCommandSecurity, sanitizeCommand } from '../security/index.js';
 import { decideByMode } from '../security/modes.js';
 import { logger } from '../utils/logger.js';
@@ -376,7 +377,23 @@ export function createTools(deps: ToolFactoryDeps) {
     const release = await guard.acquireRead();
     try {
       const manager = await connectionPool.get(host.id);
-      const result = await execCommand(manager, command);
+      // V3-07: forward the onStream callback so ops tools (tail_log,
+      // search_logs, journal_query, ...) emit incremental partial:true
+      // onToolResult chunks - same pattern as exec/sudo_exec (see ~line 549).
+      // Without this, a `tail -f` or long grep blocks until the host timeout
+      // with nothing shown to the user. Each chunk appends to the existing
+      // card's output in the renderer.
+      const result = await execCommand(manager, command, (chunk) => {
+        onToolResult({
+          toolCallId,
+          toolName,
+          success: true,
+          stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
+          stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
+          authorization: 'auto',
+          partial: true,
+        });
+      });
       const success = result.exitCode === 0;
 
       // PostToolUse hooks (P1-3 fix: was missing for execReadTool)
@@ -1347,6 +1364,22 @@ export function createTools(deps: ToolFactoryDeps) {
         } catch (err) {
           return { error: `Failed to read persisted result: ${(err as Error).message}` };
         }
+      },
+    }),
+
+    get_session_usage: tool({
+      description:
+        'Get the cumulative token usage and estimated USD cost for the CURRENT session. ' +
+        "Use this to answer the user's meta-questions about token consumption or cost " +
+        '(e.g. "当前使用了多少 token", "这次会话花了多少钱"). ' +
+        'This tool queries local accounting only - it does NOT run any command on a host. ' +
+        'Never run host commands to answer usage/cost questions.',
+      parameters: z.object({}),
+      execute: async () => {
+        // Meta tool: no host, no security check, no authorization. Returns the
+        // session's accumulated token totals + estimated cost so the model can
+        // answer usage questions without touching a remote host.
+        return getSessionCostTotal(context.sessionId);
       },
     }),
 

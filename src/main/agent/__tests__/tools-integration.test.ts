@@ -388,6 +388,33 @@ describe('P1-1 Integration: Concurrency + Large Result Persistence', () => {
     expect(result).toHaveProperty('error');
     expect((result as { error: string }).error).toContain('tool-results directory');
   });
+
+  // ── V3-07: ops tools stream output incrementally ──────────────────────
+  // execReadTool (used by tail_log/search_logs/journal_query) previously called
+  // execCommand WITHOUT the onStream callback, so a `tail -f` or long-running
+  // grep blocked until the host timeout with nothing shown to the user. Now it
+  // must forward the onStream callback and emit partial:true onToolResult
+  // chunks - same pattern as exec/sudo_exec (tools.ts:549-562).
+  it('V3-07: tail_log streams incremental output via partial onToolResult chunks', async () => {
+    const { tools, onToolResult } = makeTools({ safetyMode: 'autopilot' });
+
+    // Mock execCommand to invoke its 3rd-arg onStream callback with two chunks,
+    // then resolve with the full accumulated result.
+    mocks.execCommand.mockImplementation(async (_mgr, _cmd, onStream) => {
+      onStream?.({ stream: 'stdout', data: 'line-1\n' });
+      onStream?.({ stream: 'stdout', data: 'line-2\n' });
+      return { stdout: 'line-1\nline-2\n', stderr: '', exitCode: 0, durationMs: 10 };
+    });
+
+    await callTool(tools, 'tail_log', { path: '/var/log/syslog', lines: 50 });
+
+    // At least two partial chunks must have been emitted to the UI.
+    const partialCalls = onToolResult.mock.calls.map((c) => c[0]).filter((r) => r.partial === true);
+    expect(partialCalls.length).toBeGreaterThanOrEqual(2);
+    // The streamed chunk data must carry the stdout content.
+    expect(partialCalls.some((r) => r.stdout === 'line-1\n')).toBe(true);
+    expect(partialCalls.some((r) => r.stdout === 'line-2\n')).toBe(true);
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════
