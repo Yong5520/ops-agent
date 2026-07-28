@@ -6,7 +6,12 @@
 // close the ssh2 stream and resolve with the partial output accumulated so
 // far. Pure state module - no SSH, no IPC - so it runs directly in vitest.
 import { describe, it, expect, vi } from 'vitest';
-import { createRunningCommandRegistry } from '../running-command-registry.js';
+import {
+  createRunningCommandRegistry,
+  registerRunningCommand,
+  unregisterRunningCommand,
+  abortRunningCommand,
+} from '../running-command-registry.js';
 
 describe('RunningCommandRegistry', () => {
   it('register stores a controller and abort() triggers it', () => {
@@ -85,5 +90,43 @@ describe('RunningCommandRegistry', () => {
     const controller = new AbortController();
     registry.register('tc-6', controller);
     expect(registry.get('tc-6')).toBe(controller);
+  });
+});
+
+// ── V3-07 Cycle C: module-level singleton accessors ─────────────────────
+// The global singleton is what the stop-tool IPC handler reaches via
+// abortRunningCommand. These tests cover the public contract the renderer's
+// Stop button depends on. They share the singleton, so each test uses a
+// unique toolCallId and cleans up via unregister to avoid cross-test bleed.
+describe('global singleton accessors', () => {
+  it('abortRunningCommand returns false for an unregistered id', () => {
+    expect(abortRunningCommand('singleton-unknown')).toBe(false);
+  });
+
+  it('registerRunningCommand + abortRunningCommand aborts the controller', () => {
+    const id = 'singleton-running';
+    const controller = new AbortController();
+    const onAbort = vi.fn();
+    controller.signal.addEventListener('abort', onAbort);
+
+    registerRunningCommand(id, controller);
+    expect(abortRunningCommand(id)).toBe(true);
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    // Entry is removed by abort, so a second abort returns false.
+    expect(abortRunningCommand(id)).toBe(false);
+
+    unregisterRunningCommand(id); // cleanup (harmless no-op after abort)
+  });
+
+  it('unregisterRunningCommand removes without aborting', () => {
+    const id = 'singleton-cleanup';
+    const controller = new AbortController();
+    const onAbort = vi.fn();
+    controller.signal.addEventListener('abort', onAbort);
+
+    registerRunningCommand(id, controller);
+    unregisterRunningCommand(id);
+    expect(abortRunningCommand(id)).toBe(false); // already removed
+    expect(onAbort).not.toHaveBeenCalled();
   });
 });

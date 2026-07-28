@@ -374,6 +374,8 @@ interface OpsAgentApi {
   agent: {
     run: (request: AgentRunRequest) => Promise<void>;
     cancel: (sessionId: string) => Promise<void>;
+    /** V3-07 Cycle C: stop a single in-flight tool command by toolCallId. */
+    stopTool: (toolCallId: string) => Promise<{ stopped: boolean }>;
     compact: (sessionId: string, instructions?: string) => Promise<AgentCompactResult>;
     getContext: (sessionId: string) => Promise<ContextBreakdown>;
     quickCommand: (

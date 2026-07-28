@@ -38,6 +38,7 @@ import {
   testProviderConnection,
 } from '../agent/providers.js';
 import { connectionPool, execCommand } from '../ssh/index.js';
+import { abortRunningCommand } from '../ssh/running-command-registry.js';
 import { registerTerminalHandlers, closeAllTerminals } from './terminal.js';
 import type { AuthorizationResponse } from '../agent/types.js';
 import type {
@@ -193,6 +194,11 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Sessions.COST_TOTAL, async (_e, sessionId: string) =>
     getSessionCostTotal(sessionId),
   );
+  // V3-07 Cycle C: stop a single in-flight tool command (e.g. tail -f) by
+  // toolCallId. Returns { stopped: boolean }. Bridges to the global registry.
+  ipcMain.handle(Channels.Agent.STOP_TOOL, async (_e, toolCallId: string) => ({
+    stopped: abortRunningCommand(toolCallId),
+  }));
   ipcMain.handle(
     Channels.Sessions.DELETE_MESSAGES_AFTER,
     async (_e, sessionId: string, messageId: string) =>

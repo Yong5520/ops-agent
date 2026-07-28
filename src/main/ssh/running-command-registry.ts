@@ -61,3 +61,28 @@ export function createRunningCommandRegistry(): RunningCommandRegistry {
     },
   };
 }
+
+// Module-level singleton. The renderer's Stop button reaches the registry via
+// an IPC handler (handlers.ts) that calls abortRunningCommand(toolCallId) -
+// it cannot reach the per-run registry inside createTools, so a singleton is
+// used. Safe because toolCallIds are globally unique and at most one agent run
+// is active at a time.
+const globalRegistry = createRunningCommandRegistry();
+
+/** Abort the in-flight command for toolCallId, if any. Returns true if a
+ * command was found and signaled to stop. Used by the stop-tool IPC handler. */
+export function abortRunningCommand(toolCallId: string): boolean {
+  if (!globalRegistry.has(toolCallId)) return false;
+  globalRegistry.abort(toolCallId);
+  return true;
+}
+
+/** Register a controller with the global singleton (used by execReadTool). */
+export function registerRunningCommand(toolCallId: string, controller: AbortController): void {
+  globalRegistry.register(toolCallId, controller);
+}
+
+/** Unregister a controller on normal completion (used by execReadTool). */
+export function unregisterRunningCommand(toolCallId: string): void {
+  globalRegistry.unregister(toolCallId);
+}

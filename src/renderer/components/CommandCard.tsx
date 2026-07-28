@@ -37,7 +37,25 @@ export function CommandCard({ card, onReRun }: CommandCardProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchActive, setSearchActive] = useState(false);
   const [copied, setCopied] = useState<'cmd' | 'output' | null>(null);
+  // V3-07 Cycle C: local stop-button state (shown while a tool is executing).
+  const [stopping, setStopping] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // V3-07 Cycle C: stop an in-flight command (tail -f, long grep, ...) by
+  // toolCallId. Bridges to runningCommands.abort in the main process; the
+  // command then resolves with its partial output. No-op for already-finished
+  // commands (the button only renders while status === 'executing').
+  const handleStop = async () => {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      await window.opsAgent.agent.stopTool(card.toolCallId);
+    } catch {
+      // Non-fatal: the command may have finished between render and click.
+    } finally {
+      setStopping(false);
+    }
+  };
 
   const hasOutput =
     (card.stdout && card.stdout.length > 0) || (card.stderr && card.stderr.length > 0);
@@ -147,6 +165,16 @@ export function CommandCard({ card, onReRun }: CommandCardProps) {
             >
               {copied === 'cmd' ? '✓' : '⧉'}
             </button>
+            {card.status === 'executing' && (
+              <button
+                onClick={handleStop}
+                disabled={stopping}
+                title={stopping ? '正在停止…' : '停止该命令（保留已收到的输出）'}
+                className="text-red-400 hover:text-red-300 disabled:opacity-40 text-xs px-1.5 py-0.5 rounded hover:bg-zinc-800"
+              >
+                {stopping ? '…' : '■'}
+              </button>
+            )}
             {onReRun && card.status === 'success' && card.command && (
               <button
                 onClick={() => onReRun(card.command!, card.hostName)}

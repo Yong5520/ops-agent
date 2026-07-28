@@ -106,6 +106,7 @@ const api: OpsAgentApi = {
   agent: {
     run: (request) => ipcRenderer.invoke('agent:run', request),
     cancel: (sessionId: string) => ipcRenderer.invoke('agent:cancel', sessionId),
+    stopTool: (toolCallId: string) => ipcRenderer.invoke('agent:stop-tool', toolCallId),
     compact: (sessionId: string, instructions?: string) =>
       ipcRenderer.invoke('agent:compact', sessionId, instructions),
     getContext: (sessionId: string) => ipcRenderer.invoke('agent:getContext', sessionId),

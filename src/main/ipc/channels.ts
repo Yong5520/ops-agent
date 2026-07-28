@@ -94,6 +94,9 @@ export const Channels = {
     MODE_CHANGE: 'agent:mode-change',
     // AskUserQuestion (P1-4)
     ASK_USER_REQUEST: 'agent:ask-user-request',
+    // V3-07 Cycle C: stop a single in-flight tool command by toolCallId
+    // (e.g. a running tail -f). Bridges to runningCommands.abort.
+    STOP_TOOL: 'agent:stop-tool',
     // Handler: renderer -> main (via ipcMain.handle)
     AUTHORIZATION_RESPONSE: 'agent:authorization-response',
     PLAN_APPROVAL_RESPONSE: 'agent:plan-approval-response',

@@ -40,7 +40,11 @@ import {
 } from './hooks/engine.js';
 import { createConcurrencyGuard, type ReleaseFunction } from './concurrency.js';
 import { shouldPersist, persistToolResult, readPersistedResult } from './tool-results.js';
-import { createRunningCommandRegistry } from '../ssh/running-command-registry.js';
+import {
+  registerRunningCommand,
+  unregisterRunningCommand,
+  abortRunningCommand,
+} from '../ssh/running-command-registry.js';
 import {
   buildTailLogCommand,
   buildSearchLogsCommand,
@@ -100,10 +104,11 @@ export function createTools(deps: ToolFactoryDeps) {
   // lock while waiting for user authorization.
   const guard = createConcurrencyGuard(5);
 
-  // V3-07 Cycle B: registry of in-flight ops-tool commands (tail_log, ...),
-  // keyed by toolCallId. stop_tail looks up the AbortController here to cancel
-  // a running tail -f / long command instead of waiting for the host timeout.
-  const runningCommands = createRunningCommandRegistry();
+  // V3-07 Cycle B: in-flight ops-tool commands (tail_log, ...) are tracked in
+  // the module-level singleton registry (running-command-registry.ts) so the
+  // renderer's Stop button can reach them via the stop-tool IPC handler.
+  // registerRunningCommand / unregisterRunningCommand / abortRunningCommand
+  // are used below; stop_tail calls abortRunningCommand directly.
 
   // TodoWrite tool (P0-1): task list management, closured over sessionId
   const todoWriteTool = createTodoWriteTool(context.sessionId, onTodosUpdate);
@@ -385,7 +390,7 @@ export function createTools(deps: ToolFactoryDeps) {
     // button) can cancel this in-flight command by toolCallId. Unregistered in
     // finally so the entry does not leak after the command finishes normally.
     const abortController = new AbortController();
-    runningCommands.register(toolCallId, abortController);
+    registerRunningCommand(toolCallId, abortController);
     try {
       const manager = await connectionPool.get(host.id);
       // V3-07: forward the onStream callback so ops tools (tail_log,
@@ -495,7 +500,7 @@ export function createTools(deps: ToolFactoryDeps) {
       // V3-07 Cycle B: drop the AbortController entry on completion (normal or
       // error). If the command was aborted via stop_tail, abort() already
       // removed the entry and unregister is a harmless no-op.
-      runningCommands.unregister(toolCallId);
+      unregisterRunningCommand(toolCallId);
       release();
     }
   }
@@ -1373,14 +1378,13 @@ export function createTools(deps: ToolFactoryDeps) {
         toolCallId: z.string().describe('The toolCallId of the running tail_log command to stop'),
       }),
       execute: async ({ toolCallId }) => {
-        const wasRunning = runningCommands.has(toolCallId);
-        if (!wasRunning) {
+        const stopped = abortRunningCommand(toolCallId);
+        if (!stopped) {
           return {
             stopped: false,
             note: `No running command found for toolCallId ${toolCallId}. It may have already finished.`,
           };
         }
-        runningCommands.abort(toolCallId);
         return {
           stopped: true,
           note: `Signaled stop for toolCallId ${toolCallId}. The command will resolve with its partial output.`,
