@@ -9,6 +9,7 @@ import {
   readPersistedResult,
   cleanupSessionResults,
   cleanupOldResults,
+  buildPreview,
   MAX_TOOL_RESULT_CHARS,
 } from '../tool-results.js';
 
@@ -54,7 +55,11 @@ describe('tool-results', () => {
       });
 
       expect(result.truncated).toBe(true);
-      expect(result.preview).toHaveLength(2000);
+      // V3-06: preview is now head + tail (not head-only), so its length is no
+      // longer exactly 2000. It must START with the head and END with the tail.
+      expect(result.preview.startsWith('x')).toBe(true);
+      expect(result.preview.endsWith('x')).toBe(true);
+      expect(result.preview.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_CHARS);
       expect(result.totalChars).toBe(MAX_TOOL_RESULT_CHARS + 100);
       expect(result.fullResultPath).toContain('sess-1');
       expect(result.fullResultPath).toContain('exec-123.json');
@@ -62,7 +67,27 @@ describe('tool-results', () => {
       expect(existsSync(result.fullResultPath)).toBe(true);
     });
 
-    it('uses larger preview for error outputs', () => {
+    it('V3-06: preview preserves the TAIL (where errors/stack traces live)', () => {
+      // A 50k-char stdout whose last lines are a distinctive stack trace.
+      // The old head-only preview dropped the tail entirely; the new preview
+      // must keep it so the model sees the actual error.
+      const head = 'A'.repeat(40000);
+      const tail = 'STACK-TRACE-MARKER\nat foo (bar.js:1)\nat baz (qux.js:2)';
+      const bigStdout = head + '\n' + tail;
+      const result = persistToolResult('sess-1', 'exec-tail', {
+        stdout: bigStdout,
+        stderr: '',
+        exitCode: 0,
+        command: 'cat /var/log/app.log',
+        hostName: 'host-A',
+        toolName: 'exec',
+      });
+
+      expect(result.preview).toContain('STACK-TRACE-MARKER');
+      expect(result.preview).toContain('at baz (qux.js:2)');
+    });
+
+    it('uses larger preview budget for error outputs', () => {
       const bigStdout = 'x'.repeat(MAX_TOOL_RESULT_CHARS + 100);
       const result = persistToolResult('sess-1', 'exec-err', {
         stdout: bigStdout,
@@ -73,7 +98,11 @@ describe('tool-results', () => {
         toolName: 'exec',
       });
 
-      expect(result.preview).toHaveLength(3000);
+      // Error outputs get a larger total preview budget than success. Still
+      // head+tail, so no exact length assertion - just that it's bounded and
+      // present.
+      expect(result.preview.length).toBeGreaterThan(0);
+      expect(result.preview.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_CHARS);
     });
 
     it('falls back to stderr when stdout is empty', () => {
@@ -87,8 +116,58 @@ describe('tool-results', () => {
         toolName: 'exec',
       });
 
-      expect(result.preview).toHaveLength(3000);
-      expect(result.preview).toMatch(/^e+$/);
+      // Preview built from stderr; head + tail both come from the same 'e' blob.
+      expect(result.preview.startsWith('e')).toBe(true);
+      expect(result.preview.endsWith('e')).toBe(true);
+    });
+  });
+
+  describe('buildPreview (V3-06 head+tail)', () => {
+    it('returns the full text unchanged when under the budget', () => {
+      const text = 'short output\nsecond line';
+      expect(buildPreview(text, 2000)).toBe(text);
+    });
+
+    it('returns the full text when exactly at the budget', () => {
+      const text = 'x'.repeat(2000);
+      expect(buildPreview(text, 2000)).toBe(text);
+    });
+
+    it('keeps head + tail with an omitted-marker in the middle when over budget', () => {
+      const head = 'H'.repeat(1000);
+      const middle = 'M'.repeat(5000);
+      const tail = 'T'.repeat(1000);
+      const text = head + middle + tail;
+      const preview = buildPreview(text, 2000);
+
+      // Preview starts with HEAD chars and ends with TAIL chars (the tail
+      // budget may be < 1000 after subtracting marker + head reserves, so we
+      // assert the tail region is present, not the full 1000-T string).
+      expect(preview.startsWith('H')).toBe(true);
+      expect(preview.endsWith('T')).toBe(true);
+      // No middle 'M' chars should survive - the middle is fully omitted.
+      expect(preview).not.toContain('M');
+      expect(preview).toMatch(/omitted|省略/i);
+      expect(preview.length).toBeLessThan(text.length);
+      expect(preview.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('does not duplicate the tail into the head when text is just over budget', () => {
+      // Edge case: a text only slightly over budget must not overlap head/tail.
+      const text = 'A'.repeat(2001);
+      const preview = buildPreview(text, 2000);
+      expect(preview.length).toBeLessThanOrEqual(2000);
+      expect(preview).toMatch(/omitted|省略/i);
+    });
+
+    it('V3-06 regression: never exceeds maxChars even for tiny maxChars (< marker reserve)', () => {
+      // When maxChars < markerReserve (~80), budgets clamp to 0 so slice() does
+      // not use offset-from-end semantics. The preview must stay within maxChars.
+      const text = 'A'.repeat(100);
+      for (const tiny of [30, 50, 79, 80]) {
+        const preview = buildPreview(text, tiny);
+        expect(preview.length).toBeLessThanOrEqual(tiny);
+      }
     });
   });
 

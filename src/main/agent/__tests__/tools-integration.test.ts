@@ -82,6 +82,18 @@ vi.mock('../memory/claudemd.js', () => ({
   buildMemoryPromptSection: vi.fn(() => ''),
 }));
 
+// Mock the cost store so the get_session_usage tool can be tested without a DB.
+vi.mock('../../storage/cost-store.js', () => ({
+  getSessionCostTotal: vi.fn(() => ({
+    promptTokens: 1500,
+    completionTokens: 300,
+    totalTokens: 1800,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    estimatedUsd: 0.009,
+  })),
+}));
+
 // ── Import after mocks ─────────────────────────────────────────────────
 import { createTools } from '../tools.js';
 import { setResultsBaseDir, MAX_TOOL_RESULT_CHARS } from '../tool-results.js';
@@ -268,7 +280,10 @@ describe('P1-1 Integration: Concurrency + Large Result Persistence', () => {
       hint: string;
     };
     expect(r.truncated).toBe(true);
-    expect(r.preview).toHaveLength(2000);
+    // V3-06: preview is now head + tail (not head-only), so no exact-length
+    // assertion. It must start with the head chars and be bounded.
+    expect(r.preview.startsWith('x')).toBe(true);
+    expect(r.preview.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_CHARS);
     expect(r.totalChars).toBe(MAX_TOOL_RESULT_CHARS + 500);
     expect(r.fullResultPath).toContain('test-session');
     expect(r.hint).toContain('read_tool_result');
@@ -357,7 +372,9 @@ describe('P1-1 Integration: Concurrency + Large Result Persistence', () => {
 
     const r = result as { truncated: boolean; preview: string; fullResultPath: string };
     expect(r.truncated).toBe(true);
-    expect(r.preview).toHaveLength(2000);
+    // V3-06: preview is head + tail now; assert it's bounded and head-starts.
+    expect(r.preview.startsWith('z')).toBe(true);
+    expect(r.preview.length).toBeLessThanOrEqual(MAX_TOOL_RESULT_CHARS);
     expect(r.fullResultPath).toContain('test-session');
   });
 
@@ -592,5 +609,42 @@ describe('P1-4 Integration: Denial tracking (simulates loop.ts wiring)', () => {
     // Subsequent rejection doesn't immediately re-trigger nudge
     recordDenial(tracker, 'exec', 'rejected', 'new-cmd');
     expect(shouldNudgeAfterDenials(tracker).shouldNudge).toBe(false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// V3-01: get_session_usage tool (meta-question escape hatch)
+// ════════════════════════════════════════════════════════════════════════
+
+describe('get_session_usage tool', () => {
+  it('returns cumulative token usage + estimated cost for the session', async () => {
+    const { tools } = makeTools({ safetyMode: 'sentinel' });
+
+    const result = (await callTool(tools, 'get_session_usage', {})) as {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      estimatedUsd: number;
+    };
+
+    // Mirrors the mocked getSessionCostTotal return value.
+    expect(result.promptTokens).toBe(1500);
+    expect(result.completionTokens).toBe(300);
+    expect(result.totalTokens).toBe(1800);
+    expect(result.estimatedUsd).toBeCloseTo(0.009, 6);
+  });
+
+  it('is available even in sentinel (read-only) mode - it touches no host', async () => {
+    // A meta-question tool must work regardless of safety mode: it never
+    // executes anything on a remote host, so sentinel's READ-only restriction
+    // must not block it. No authorization should be requested.
+    const { tools, onAuth, onToolCall } = makeTools({ safetyMode: 'sentinel' });
+
+    await callTool(tools, 'get_session_usage', {});
+
+    // A meta tool touches no host, so neither authorization nor tool-call
+    // notifications should fire.
+    expect(onAuth).not.toHaveBeenCalled();
+    expect(onToolCall).not.toHaveBeenCalled();
   });
 });

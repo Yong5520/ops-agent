@@ -3,19 +3,32 @@
 // All commands are READ-only (no system state mutation).
 // Paths are single-quoted to prevent injection.
 
+// V3-06: clamp a count-like param into [min, max]. Prevents the model from
+// requesting unbounded reads (e.g. tail -n 999999) that would flood the context
+// window with a single tool result. Defaults to `fallback` when value is
+// undefined/null.
+function clamp(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (value === undefined || value === null || Number.isNaN(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
 // Quote a path for safe use in shell commands.
 function quote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 // tail_log: read the last N lines of a file, optionally following.
+// V3-06: lines clamped to [1, 2000] so the model can't request tail -n 999999.
 export function buildTailLogCommand(path: string, lines?: number, follow?: boolean): string {
-  const n = lines ?? 200;
+  const n = clamp(lines, 1, 2000, 200);
   const f = follow ? ' -f' : '';
   return `tail -n ${n}${f} ${quote(path)}`;
 }
 
 // search_logs: grep across log files with context.
+// V3-06: contextLines clamped to [0, 10], maxResults to [1, 500] - a high
+// contextLines or maxResults can explode the grep output just as badly as a
+// large tail count.
 export function buildSearchLogsCommand(
   pattern: string,
   paths: string[],
@@ -23,17 +36,20 @@ export function buildSearchLogsCommand(
 ): string {
   const parts: string[] = ['grep', '-n'];
   if (opts.caseInsensitive) parts.push('-i');
-  if (opts.contextLines) parts.push(`-C ${opts.contextLines}`);
+  const contextLines = clamp(opts.contextLines, 0, 10, 0);
+  if (contextLines > 0) parts.push(`-C ${contextLines}`);
   parts.push(quote(pattern));
   for (const p of paths) parts.push(quote(p));
   let cmd = parts.join(' ');
-  if (opts.maxResults) {
-    cmd += ` | head -n ${opts.maxResults}`;
+  if (opts.maxResults !== undefined) {
+    const maxResults = clamp(opts.maxResults, 1, 500, 500);
+    cmd += ` | head -n ${maxResults}`;
   }
   return cmd;
 }
 
 // journal_query: query systemd journal.
+// V3-06: lines clamped to [1, 2000].
 export function buildJournalQueryCommand(opts: {
   unit?: string;
   priority?: string;
@@ -47,7 +63,7 @@ export function buildJournalQueryCommand(opts: {
   if (opts.since) parts.push(`--since ${quote(opts.since)}`);
   if (opts.until) parts.push(`--until ${quote(opts.until)}`);
   parts.push('--no-pager');
-  parts.push(`-n ${opts.lines ?? 100}`);
+  parts.push(`-n ${clamp(opts.lines, 1, 2000, 100)}`);
   return parts.join(' ');
 }
 

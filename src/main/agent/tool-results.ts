@@ -64,6 +64,58 @@ export function shouldPersist(stdout: string, stderr: string): boolean {
   return stdout.length + stderr.length > MAX_TOOL_RESULT_CHARS;
 }
 
+/**
+ * Build a head + tail preview of `text` that fits within `maxChars`.
+ *
+ * V3-06: the previous preview was head-only (`slice(0, N)`), which dropped the
+ * tail of command output - exactly where error messages and stack traces live.
+ * This keeps a head chunk, an omitted-marker, and a tail chunk so the model
+ * sees both the start (command context) and the end (errors) of a large result.
+ *
+ * When the text fits within `maxChars`, it is returned unchanged. When it does
+ * not, the result is `head + marker + tail` where the marker reports how many
+ * chars were omitted, and the whole is capped at `maxChars`. Head and tail are
+ * split roughly equally; the tail is capped at 1500 chars and the head takes
+ * the remainder (both errors at the tail and command context at the head are
+ * preserved).
+ *
+ * NOTE: callers pass 2000/3000 in practice. For tiny `maxChars` (< ~80, less
+ * than the marker reserve), the budgets clamp to 0 and the preview collapses
+ * to just the marker - still within the maxChars contract.
+ */
+export function buildPreview(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+
+  // Marker reserved space; leave room for head + marker + tail.
+  const MARKER = (omitted: number): string => `\n... (省略 ${omitted} 字符，完整结果已落盘) ...\n`;
+  // Worst-case marker length (omitted up to text.length digits). Overestimate
+  // is safe; we recompute the real marker after splitting.
+  const markerReserve = 80;
+  // Clamp budgets to >= 0: if maxChars < markerReserve, both would go negative
+  // and `slice(0, negative)` uses offset-from-end semantics (returns nearly the
+  // whole text), violating the maxChars contract. Math.max(0, ...) collapses
+  // them to empty slices instead, keeping the preview within bounds.
+  const tailBudget = Math.max(0, Math.min(Math.floor((maxChars - markerReserve) / 2), 1500));
+  const headBudget = Math.max(0, maxChars - tailBudget - markerReserve);
+
+  const tail = text.slice(text.length - tailBudget);
+  const head = text.slice(0, headBudget);
+
+  // Recompute the real marker with the actual omitted count, then re-fit. The
+  // real marker may be shorter than the reserve, so the final string may be
+  // under maxChars - that's fine. We cap the tail a final time to guarantee the
+  // total never exceeds maxChars regardless of marker length variance.
+  const omitted = text.length - head.length - tail.length;
+  const marker = MARKER(omitted);
+  let preview = head + marker + tail;
+  if (preview.length > maxChars) {
+    // Trim the tail to absorb any marker-length overshoot.
+    const overshoot = preview.length - maxChars;
+    preview = head + marker + tail.slice(overshoot);
+  }
+  return preview;
+}
+
 export function persistToolResult(
   sessionId: string,
   toolCallId: string,
@@ -84,9 +136,11 @@ export function persistToolResult(
   const isError = data.exitCode !== null && data.exitCode !== 0;
   const previewChars = isError ? PREVIEW_CHARS_ERROR : PREVIEW_CHARS_SUCCESS;
 
-  // Preview prefers stdout; falls back to stderr for error-only outputs
+  // Preview prefers stdout; falls back to stderr for error-only outputs.
+  // V3-06: buildPreview keeps head + tail (errors live at the tail), replacing
+  // the old head-only slice(0, N) that dropped stack traces.
   const sourceText = data.stdout || data.stderr || '';
-  const preview = sourceText.slice(0, previewChars);
+  const preview = buildPreview(sourceText, previewChars);
 
   logger.info(`[ToolResults] Persisted ${totalChars} chars for ${data.toolName} -> ${filePath}`);
 
