@@ -103,6 +103,10 @@ export function ChatPage() {
         await handleContext(session.id);
         return;
       }
+      if (parsed.command === 'cost') {
+        await handleCost(session.id);
+        return;
+      }
       if (parsed.command === 'skill') {
         await handleSkillInvocation(session.id, parsed.name!, parsed.args ?? '', text);
         return;
@@ -244,6 +248,54 @@ export function ChatPage() {
         sessionId,
         role: 'system',
         content: `[错误] 获取上下文信息失败: ${(err as Error).message}`,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  };
+
+  // Handle /cost command - show cumulative token usage + estimated cost.
+  // Zero-LLM path: queries the backend cost store directly so the user can
+  // check usage without the agent misreading the question as a host task.
+  const handleCost = async (sessionId: string) => {
+    useSessionStore.getState().addMessage({
+      id: `tmp-user-${Date.now()}`,
+      sessionId,
+      role: 'user',
+      content: '/cost',
+      createdAt: new Date().toISOString(),
+    });
+
+    try {
+      const data = await window.opsAgent.sessions.getCostTotal(sessionId);
+      const formatTokens = (n: number) => {
+        if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+        return String(n);
+      };
+      const formatUsd = (usd: number) => `$${usd.toFixed(4)}`;
+
+      let content = `## 会话用量统计\n\n`;
+      content += `| 指标 | 数值 |\n|------|------|\n`;
+      content += `| 输入 tokens | ${formatTokens(data.promptTokens)} |\n`;
+      content += `| 输出 tokens | ${formatTokens(data.completionTokens)} |\n`;
+      content += `| 总 tokens | ${formatTokens(data.totalTokens)} |\n`;
+      content += `| 缓存读取 tokens | ${formatTokens(data.cacheReadTokens)} |\n`;
+      content += `| 缓存创建 tokens | ${formatTokens(data.cacheCreationTokens)} |\n`;
+      content += `| 预估费用 | ${formatUsd(data.estimatedUsd)} |\n\n`;
+      content += `> 费用为基于模型定价的估算值，仅在配置价格后非零。token 统计独立于价格始终记录。`;
+
+      useSessionStore.getState().addMessage({
+        id: `msg-system-${Date.now()}`,
+        sessionId,
+        role: 'assistant',
+        content,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      useSessionStore.getState().addMessage({
+        id: `msg-error-${Date.now()}`,
+        sessionId,
+        role: 'system',
+        content: `[错误] 获取用量信息失败: ${(err as Error).message}`,
         createdAt: new Date().toISOString(),
       });
     }

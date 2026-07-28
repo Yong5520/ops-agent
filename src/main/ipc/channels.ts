@@ -36,6 +36,7 @@ export const Channels = {
     ADD_MESSAGE: 'sessions:addMessage',
     DELETE_MESSAGES_AFTER: 'sessions:deleteMessagesAfter',
     EXPORT: 'sessions:export',
+    COST_TOTAL: 'sessions:costTotal',
   },
   Audit: {
     LIST: 'audit:list',

@@ -19,6 +19,7 @@ import type {
   HookCreateInput,
 } from '../../shared/types.js';
 import type { AskUserQuestionItem, AskUserAnswer } from '../agent/tools/ask-user.js';
+import type { SessionCostTotal } from '../storage/cost-store.js';
 
 // Strongly-typed surface exposed to the renderer via contextBridge.
 // The renderer accesses these as `window.opsAgent.*`.
@@ -301,6 +302,7 @@ export interface OpsAgentApi {
     addMessage: (payload: MessageInput) => Promise<Message>;
     deleteMessagesAfter: (sessionId: string, messageId: string) => Promise<number>;
     export: (sessionId: string) => Promise<{ markdown: string; filename: string }>;
+    getCostTotal: (sessionId: string) => Promise<SessionCostTotal>;
   };
 
   audit: {

@@ -213,6 +213,19 @@ interface ContextBreakdown {
   };
 }
 
+// Cumulative token usage + estimated USD for a session (V3-01). Mirrors
+// SessionCostTotal from src/main/storage/cost-store.ts. Kept here as a
+// standalone interface (no cross-layer import) per the renderer type-isolation
+// convention used by the other types in this file.
+interface SessionCostTotal {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  estimatedUsd: number;
+}
+
 interface SftpDirEntry {
   name: string;
   longname: string;
@@ -305,6 +318,7 @@ interface OpsAgentApi {
     addMessage: (payload: MessageInput) => Promise<Message>;
     deleteMessagesAfter: (sessionId: string, messageId: string) => Promise<number>;
     export: (sessionId: string) => Promise<{ markdown: string; filename: string }>;
+    getCostTotal: (sessionId: string) => Promise<SessionCostTotal>;
   };
   audit: {
     list: (filter: AuditFilter) => Promise<AuditLog[]>;

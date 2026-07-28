@@ -16,6 +16,7 @@ import { cleanupSessionResults } from '../agent/tool-results.js';
 import { analyzeContextBreakdown } from '../agent/context-breakdown.js';
 import { attachmentsStore } from '../storage/attachments.js';
 import { getDb } from '../storage/database.js';
+import { getSessionCostTotal } from '../storage/cost-store.js';
 import {
   listAllSkills,
   getEnabledSkills,
@@ -185,6 +186,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   );
   ipcMain.handle(Channels.Sessions.EXPORT, async (_e, sessionId: string) =>
     exportSessionToMarkdown(sessionId),
+  );
+  // Cumulative token usage + estimated USD for a session (V3-01). Powers the
+  // /cost slash command - a zero-LLM path so users can check usage without the
+  // agent misreading the question as a host task.
+  ipcMain.handle(Channels.Sessions.COST_TOTAL, async (_e, sessionId: string) =>
+    getSessionCostTotal(sessionId),
   );
   ipcMain.handle(
     Channels.Sessions.DELETE_MESSAGES_AFTER,

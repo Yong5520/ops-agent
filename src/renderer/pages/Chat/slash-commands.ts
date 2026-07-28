@@ -7,6 +7,7 @@
 // Supported commands:
 //   /compact [instructions?]  - manually trigger context compression
 //   /context                  - show context usage breakdown
+//   /cost                     - show cumulative token usage + estimated cost
 //   /skillName [args]         - invoke a skill by name
 //
 // A leading "/" followed by an unknown name is treated as a potential
@@ -14,7 +15,7 @@
 // name and inject the skill's content if so, otherwise send as-is.
 
 export interface ParsedSlashCommand {
-  command: 'compact' | 'context' | 'skill' | 'none';
+  command: 'compact' | 'context' | 'cost' | 'skill' | 'none';
   // For 'skill': the skill name (without leading /)
   name?: string;
   // For 'skill' and 'compact': remaining text after the command name
@@ -25,7 +26,7 @@ export interface ParsedSlashCommand {
 
 // Built-in command names that are NOT skills. These are intercepted by the
 // parser and never passed through as skill invocations.
-const BUILTIN_COMMANDS = new Set(['compact', 'context']);
+const BUILTIN_COMMANDS = new Set(['compact', 'context', 'cost']);
 
 export function parseSlashCommand(input: string): ParsedSlashCommand {
   const trimmed = input.trim();
@@ -55,6 +56,9 @@ export function parseSlashCommand(input: string): ParsedSlashCommand {
   }
   if (name === 'context') {
     return { command: 'context' };
+  }
+  if (name === 'cost') {
+    return { command: 'cost' };
   }
 
   // Everything else is treated as a potential skill invocation

@@ -44,6 +44,7 @@ const api: OpsAgentApi = {
     deleteMessagesAfter: (sessionId: string, messageId: string) =>
       ipcRenderer.invoke('sessions:deleteMessagesAfter', sessionId, messageId),
     export: (sessionId: string) => ipcRenderer.invoke('sessions:export', sessionId),
+    getCostTotal: (sessionId: string) => ipcRenderer.invoke('sessions:costTotal', sessionId),
   },
 
   // Audit
