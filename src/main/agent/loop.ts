@@ -31,6 +31,7 @@ import {
   shouldNudgeAfterDenials,
 } from './denial-tracking.js';
 import type { ModeHolder } from './tools/exit-plan-mode.js';
+import { hasSubstantiveText, EMPTY_RESPONSE_MARKER } from './message-text.js';
 import { hostsStore } from '../storage/hosts.js';
 import { gatherMultipleHostFacts } from './facts.js';
 import { attachmentsStore } from '../storage/attachments.js';
@@ -668,7 +669,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // Final safety close for any thinking block left open (e.g. loop exited
     // via a path that didn't hit the finish handler).
     thinkingStream.closeCurrent();
-    if (fullText) {
+    if (hasSubstantiveText(fullText)) {
       // Persist cumulative completion tokens across all sub-rounds of this turn
       // (tool-call rounds + nudges/continuations), not just the last finish.
       saveAssistantMessage(
@@ -677,6 +678,13 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
         thinkingBlocks,
         cumulativeCompletionTokens > 0 ? cumulativeCompletionTokens : undefined,
       );
+    } else {
+      // Whitespace-only fullText (e.g. nudge rounds that appended "\n\n" but
+      // never elicited real text): persist a marker so the turn is CLOSED in
+      // history. A blank/whitespace message would read as an unfinished turn,
+      // causing the next user question to be treated as a continuation of the
+      // prior pending task (orphan-task resumption - the gpu-16-36 incident).
+      saveAssistantMessage(sessionId, EMPTY_RESPONSE_MARKER, []);
     }
 
     // ── 8. Complete ────────────────────────────────────────────────────────
@@ -692,7 +700,9 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       // Save partial text even on abort so the work isn't lost. If no partial
       // text was produced, save a cancellation marker so the aborted turn is
       // closed in history (same orphan-message prevention as the failure path).
-      if (fullText) {
+      // Use hasSubstantiveText: whitespace-only fullText (e.g. "\n\n" from a
+      // nudge round) must NOT be saved as a blank real message.
+      if (hasSubstantiveText(fullText)) {
         saveAssistantMessage(sessionId, fullText, thinkingBlocks);
       } else {
         saveAssistantMessage(sessionId, '已取消。未执行任何操作。', []);
@@ -703,7 +713,9 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
 
     // Save partial assistant message so executed tool calls aren't lost.
     // The agent may have completed several steps before the error occurred.
-    if (fullText) {
+    // Use hasSubstantiveText: whitespace-only fullText must fall through to
+    // the failure marker instead of being saved as a blank real message.
+    if (hasSubstantiveText(fullText)) {
       // Tag the error so the user sees WHERE the failure came from (\u6a21\u578b\u5f02\u5e38 vs
       // \u6267\u884c\u5f02\u5e38) instead of a raw exception string.
       const errorNote = `\n\n---\n${formatExecutionErrorMessage(error)}\n\u5df2\u4fdd\u5b58\u5f53\u524d\u8fdb\u5ea6\u3002`;
