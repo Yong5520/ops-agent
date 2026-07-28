@@ -415,6 +415,54 @@ describe('P1-1 Integration: Concurrency + Large Result Persistence', () => {
     expect(partialCalls.some((r) => r.stdout === 'line-1\n')).toBe(true);
     expect(partialCalls.some((r) => r.stdout === 'line-2\n')).toBe(true);
   });
+
+  // ── V3-07 Cycle B: stop_tail cancels an in-flight command ─────────────
+  it('V3-07: stop_tail reports stopped:false for an unknown toolCallId', async () => {
+    const { tools } = makeTools({ safetyMode: 'autopilot' });
+
+    const result = await callTool(tools, 'stop_tail', { toolCallId: 'never-running' });
+    expect(result).toMatchObject({ stopped: false });
+  });
+
+  it('V3-07: stop_tail aborts a running tail_log via its toolCallId', async () => {
+    const { tools, onToolCall } = makeTools({ safetyMode: 'autopilot' });
+
+    // Mock execCommand to stream one chunk, then block on the abort signal.
+    // When stop_tail fires the AbortController, the signal listener resolves
+    // and execCommand returns the partial output (mirroring the real abort path).
+    mocks.execCommand.mockImplementation(async (_mgr, _cmd, onStream, signal) => {
+      onStream?.({ stream: 'stdout', data: 'partial-line\n' });
+      if (signal?.aborted) {
+        return {
+          stdout: 'partial-line\n',
+          stderr: '',
+          exitCode: null,
+          durationMs: 5,
+          aborted: true,
+        };
+      }
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { stdout: 'partial-line\n', stderr: '', exitCode: null, durationMs: 5, aborted: true };
+    });
+
+    // Start tail_log - it registers an AbortController and blocks on the signal.
+    const tailPromise = callTool(tools, 'tail_log', { path: '/var/log/syslog', follow: true });
+
+    // Wait for the tool to register (onToolCall fires before execCommand blocks).
+    await new Promise((r) => setTimeout(r, 50));
+    const tailCallId = onToolCall.mock.calls[onToolCall.mock.calls.length - 1][0].toolCallId;
+
+    // stop_tail with the real toolCallId -> stopped:true, and the registry
+    // aborts the controller, unblocking tail_log.
+    const stopResult = await callTool(tools, 'stop_tail', { toolCallId: tailCallId });
+    expect(stopResult).toMatchObject({ stopped: true });
+
+    // tail_log now resolves with the partial output.
+    const result = await tailPromise;
+    expect(result).toMatchObject({ stdout: 'partial-line\n' });
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════

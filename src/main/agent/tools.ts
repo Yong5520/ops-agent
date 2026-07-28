@@ -40,6 +40,7 @@ import {
 } from './hooks/engine.js';
 import { createConcurrencyGuard, type ReleaseFunction } from './concurrency.js';
 import { shouldPersist, persistToolResult, readPersistedResult } from './tool-results.js';
+import { createRunningCommandRegistry } from '../ssh/running-command-registry.js';
 import {
   buildTailLogCommand,
   buildSearchLogsCommand,
@@ -98,6 +99,11 @@ export function createTools(deps: ToolFactoryDeps) {
   // tool's execute() after preExec (security/auth), so we don't hold the
   // lock while waiting for user authorization.
   const guard = createConcurrencyGuard(5);
+
+  // V3-07 Cycle B: registry of in-flight ops-tool commands (tail_log, ...),
+  // keyed by toolCallId. stop_tail looks up the AbortController here to cancel
+  // a running tail -f / long command instead of waiting for the host timeout.
+  const runningCommands = createRunningCommandRegistry();
 
   // TodoWrite tool (P0-1): task list management, closured over sessionId
   const todoWriteTool = createTodoWriteTool(context.sessionId, onTodosUpdate);
@@ -375,6 +381,11 @@ export function createTools(deps: ToolFactoryDeps) {
     });
 
     const release = await guard.acquireRead();
+    // V3-07 Cycle B: register an AbortController so stop_tail (or the UI stop
+    // button) can cancel this in-flight command by toolCallId. Unregistered in
+    // finally so the entry does not leak after the command finishes normally.
+    const abortController = new AbortController();
+    runningCommands.register(toolCallId, abortController);
     try {
       const manager = await connectionPool.get(host.id);
       // V3-07: forward the onStream callback so ops tools (tail_log,
@@ -383,17 +394,22 @@ export function createTools(deps: ToolFactoryDeps) {
       // Without this, a `tail -f` or long grep blocks until the host timeout
       // with nothing shown to the user. Each chunk appends to the existing
       // card's output in the renderer.
-      const result = await execCommand(manager, command, (chunk) => {
-        onToolResult({
-          toolCallId,
-          toolName,
-          success: true,
-          stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
-          stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
-          authorization: 'auto',
-          partial: true,
-        });
-      });
+      const result = await execCommand(
+        manager,
+        command,
+        (chunk) => {
+          onToolResult({
+            toolCallId,
+            toolName,
+            success: true,
+            stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
+            stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
+            authorization: 'auto',
+            partial: true,
+          });
+        },
+        abortController.signal,
+      );
       const success = result.exitCode === 0;
 
       // PostToolUse hooks (P1-3 fix: was missing for execReadTool)
@@ -476,6 +492,10 @@ export function createTools(deps: ToolFactoryDeps) {
       });
       return { error: errMsg };
     } finally {
+      // V3-07 Cycle B: drop the AbortController entry on completion (normal or
+      // error). If the command was aborted via stop_tail, abort() already
+      // removed the entry and unregister is a harmless no-op.
+      runningCommands.unregister(toolCallId);
       release();
     }
   }
@@ -1339,6 +1359,32 @@ export function createTools(deps: ToolFactoryDeps) {
           buildNetworkConnectionsCommand({ port, state }),
           'ss -tunap',
         );
+      },
+    }),
+
+    stop_tail: tool({
+      description:
+        'Stop a currently running tail_log (or other long-running ops) command ' +
+        'by its toolCallId. Use after starting a tail_log with follow=true when ' +
+        'you have seen enough output. Returns whether a command was found and ' +
+        'signaled to stop. The stopped command resolves with the partial output ' +
+        'accumulated so far.',
+      parameters: z.object({
+        toolCallId: z.string().describe('The toolCallId of the running tail_log command to stop'),
+      }),
+      execute: async ({ toolCallId }) => {
+        const wasRunning = runningCommands.has(toolCallId);
+        if (!wasRunning) {
+          return {
+            stopped: false,
+            note: `No running command found for toolCallId ${toolCallId}. It may have already finished.`,
+          };
+        }
+        runningCommands.abort(toolCallId);
+        return {
+          stopped: true,
+          note: `Signaled stop for toolCallId ${toolCallId}. The command will resolve with its partial output.`,
+        };
       },
     }),
 

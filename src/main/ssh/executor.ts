@@ -13,10 +13,17 @@ import type { ExecResult, ExecStreamCallback } from './types.js';
 //   - su shell path preserved for hosts with suPassword configured
 
 // Execute a normal command on the host.
+//
+// `signal` (optional, V3-07 Cycle B): when aborted, the ssh2 stream is closed
+// and the promise resolves with the partial output accumulated so far
+// (exitCode = null). This lets stop_tail / the UI stop button cancel a
+// long-running command (tail -f, slow grep) instead of waiting for the host
+// timeout.
 export async function execCommand(
   manager: SSHConnectionManager,
   command: string,
   onStream?: ExecStreamCallback,
+  signal?: AbortSignal,
 ): Promise<ExecResult> {
   await manager.ensureConnected();
   const start = Date.now();
@@ -33,6 +40,7 @@ export async function execCommand(
     let stdout = '';
     let stderr = '';
     let exitCode: number | null = null;
+    let activeStream: { close: () => void } | null = null;
 
     const timeoutId = setTimeout(() => {
       if (!isResolved) {
@@ -46,6 +54,45 @@ export async function execCommand(
       }
     }, timeout);
 
+    // V3-07 Cycle B: abort handling. On signal abort, close the ssh2 stream so
+    // the remote command terminates, then resolve with the partial output. The
+    // stream's 'close' handler is a no-op once isResolved is set.
+    const onAbort = () => {
+      if (isResolved) return;
+      isResolved = true;
+      clearTimeout(timeoutId);
+      try {
+        activeStream?.close();
+      } catch {
+        // stream already gone - ignore
+      }
+      resolve({
+        stdout,
+        stderr,
+        exitCode: null, // aborted - no real exit code
+        durationMs: Date.now() - start,
+        viaSuShell: false,
+        aborted: true,
+      });
+    };
+    if (signal) {
+      if (signal.aborted) {
+        // Already aborted before exec started - resolve immediately with empty.
+        isResolved = true;
+        clearTimeout(timeoutId);
+        resolve({
+          stdout: '',
+          stderr: '',
+          exitCode: null,
+          durationMs: 0,
+          viaSuShell: false,
+          aborted: true,
+        });
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     const conn = manager.getConnection();
     conn.exec(command, (err, stream) => {
       if (err) {
@@ -56,6 +103,8 @@ export async function execCommand(
         }
         return;
       }
+
+      activeStream = stream as unknown as { close: () => void };
 
       stream.on('data', (data: Buffer) => {
         const chunk = data.toString();
@@ -74,6 +123,7 @@ export async function execCommand(
         if (!isResolved) {
           isResolved = true;
           clearTimeout(timeoutId);
+          if (signal) signal.removeEventListener('abort', onAbort);
           resolve({
             stdout,
             stderr,
@@ -92,12 +142,13 @@ export async function sudoExecCommand(
   manager: SSHConnectionManager,
   command: string,
   onStream?: ExecStreamCallback,
+  signal?: AbortSignal,
 ): Promise<ExecResult> {
   await manager.ensureConnected();
 
   // If su shell is active, the command already runs as root — skip wrapping.
   if (manager.getSuShell()) {
-    return execCommand(manager, command, onStream);
+    return execCommand(manager, command, onStream, signal);
   }
 
   const sudoPassword = manager.sudoPassword;
@@ -116,7 +167,7 @@ export async function sudoExecCommand(
     wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${escapedCmd}'`;
   }
 
-  return execCommand(manager, wrapped, onStream);
+  return execCommand(manager, wrapped, onStream, signal);
 }
 
 // Execute a command via the persistent su shell.

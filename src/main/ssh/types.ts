@@ -35,13 +35,14 @@ export interface ExecResult {
   durationMs: number;
   // True if the command was executed via the persistent su shell.
   viaSuShell: boolean;
+  // V3-07 Cycle B: true if the command was cancelled via AbortSignal (stop_tail
+  // / UI stop button). exitCode is null in that case; stdout/stderr hold the
+  // partial output accumulated before the abort.
+  aborted?: boolean;
 }
 
 // Streaming callback invoked as stdout/stderr chunks arrive.
-export type ExecStreamCallback = (chunk: {
-  stream: 'stdout' | 'stderr';
-  data: string;
-}) => void;
+export type ExecStreamCallback = (chunk: { stream: 'stdout' | 'stderr'; data: string }) => void;
 
 // Re-export ssh2 types for convenience.
 export type { Client, SFTPWrapper };
