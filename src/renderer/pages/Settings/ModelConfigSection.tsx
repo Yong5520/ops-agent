@@ -3,6 +3,7 @@ import { useModelStore } from '../../store/modelStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { Input, Field, Select } from '../../components/Form.js';
+import { parsePriceField } from '../../lib/parse-price-field.js';
 import type {
   ModelProvider,
   ModelProviderInput,
@@ -109,6 +110,21 @@ function ModelForm({
   const [contextWindow, setContextWindow] = useState(
     editing?.contextWindow ? String(editing.contextWindow) : '',
   );
+  // V3-01 Cycle 5: per-million-token pricing (USD). Free-text -> parsed via
+  // parsePriceField on submit. Empty = "not configured" (estimated_usd stays 0,
+  // token totals still persist). Loaded from the provider row in edit mode.
+  const [inputPrice, setInputPrice] = useState(
+    editing?.inputPricePerMTok != null ? String(editing.inputPricePerMTok) : '',
+  );
+  const [outputPrice, setOutputPrice] = useState(
+    editing?.outputPricePerMTok != null ? String(editing.outputPricePerMTok) : '',
+  );
+  const [cacheReadPrice, setCacheReadPrice] = useState(
+    editing?.cacheReadPricePerMTok != null ? String(editing.cacheReadPricePerMTok) : '',
+  );
+  const [cacheCreationPrice, setCacheCreationPrice] = useState(
+    editing?.cacheCreationPricePerMTok != null ? String(editing.cacheCreationPricePerMTok) : '',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -133,6 +149,10 @@ function ModelForm({
         apiKey: apiKey.trim() || undefined!,
         modelName: modelName.trim(),
         contextWindow: contextWindow.trim() ? Number(contextWindow.trim()) : undefined,
+        inputPricePerMTok: parsePriceField(inputPrice),
+        outputPricePerMTok: parsePriceField(outputPrice),
+        cacheReadPricePerMTok: parsePriceField(cacheReadPrice),
+        cacheCreationPricePerMTok: parsePriceField(cacheCreationPrice),
       };
       await onSave(input);
     } catch (err) {
@@ -232,6 +252,53 @@ function ModelForm({
               placeholder="例如: 128000（留空自动推断）"
             />
           </Field>
+          {/* V3-01 Cycle 5: per-million-token pricing (USD). Optional - when left
+              blank, estimated_usd = 0 but token totals still persist. Common
+              defaults: Claude Sonnet input $3 / output $15 / cache-read $0.30 /
+              cache-creation $3.75 per 1M tokens. */}
+          <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+            <div className="mb-2 text-xs font-medium text-zinc-400">
+              计费定价（可选，USD / 百万 tokens。留空则不估算成本，token 仍会记录）
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="输入 ($/MTok)">
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={inputPrice}
+                  onChange={(e) => setInputPrice(e.target.value)}
+                  placeholder="例如: 3"
+                />
+              </Field>
+              <Field label="输出 ($/MTok)">
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={outputPrice}
+                  onChange={(e) => setOutputPrice(e.target.value)}
+                  placeholder="例如: 15"
+                />
+              </Field>
+              <Field label="缓存读取 ($/MTok)">
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={cacheReadPrice}
+                  onChange={(e) => setCacheReadPrice(e.target.value)}
+                  placeholder="例如: 0.30"
+                />
+              </Field>
+              <Field label="缓存写入 ($/MTok)">
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={cacheCreationPrice}
+                  onChange={(e) => setCacheCreationPrice(e.target.value)}
+                  placeholder="例如: 3.75"
+                />
+              </Field>
+            </div>
+          </div>
           <FormTestButton
             buildInput={() => ({
               name: name.trim(),
@@ -240,6 +307,10 @@ function ModelForm({
               apiKey: apiKey.trim() || undefined!,
               modelName: modelName.trim(),
               contextWindow: contextWindow.trim() ? Number(contextWindow.trim()) : undefined,
+              inputPricePerMTok: parsePriceField(inputPrice),
+              outputPricePerMTok: parsePriceField(outputPrice),
+              cacheReadPricePerMTok: parsePriceField(cacheReadPrice),
+              cacheCreationPricePerMTok: parsePriceField(cacheCreationPrice),
             })}
             editingId={editing?.id}
           />
