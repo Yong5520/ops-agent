@@ -19,6 +19,7 @@ import { createThinkingStream } from './thinking-stream.js';
 import { detectRepetition } from './loop-repetition-guard.js';
 import { extractUsage, type ModelPricing } from './cost-tracking.js';
 import { recordSessionCost } from '../storage/cost-store.js';
+import { taskListsStore } from '../storage/task-lists.js';
 import {
   formatExecutionErrorMessage,
   isTransientNetworkError,
@@ -37,7 +38,7 @@ import { gatherMultipleHostFacts } from './facts.js';
 import { attachmentsStore } from '../storage/attachments.js';
 import { logger } from '../utils/logger.js';
 import type { AgentLoopParams, SessionContext, ToolCallResult } from './types.js';
-import type { ThinkingBlock } from '../../shared/types.js';
+import type { ThinkingBlock, TodoItem } from '../../shared/types.js';
 
 // Agent main loop - the core of the application.
 //
@@ -97,10 +98,22 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       .map((h) => ({ id: h.id, name: h.name }));
     const hostFacts = await gatherMultipleHostFacts(hostInfos);
 
+    // Read back the persisted todo list so a resumed session continues from
+    // the last completed step instead of re-planning from scratch. Wrapped in
+    // try/catch so a transient DB issue never aborts the run - worst case the
+    // model runs without task-list injection (pre-fix behavior).
+    let persistedTodos: TodoItem[] | undefined;
+    try {
+      persistedTodos = taskListsStore.get(sessionId) ?? undefined;
+    } catch (err) {
+      logger.warn(`[Agent] Failed to load task list for session ${sessionId}: ${err}`);
+    }
+
     const { staticPrefix, dynamicSuffix } = buildSystemPrompt({
       selectedHostIds: hostIds,
       safetyMode,
       hostFacts,
+      todos: persistedTodos,
     });
 
     // ── 3. Resolve this session's model (needed before context compression) ─

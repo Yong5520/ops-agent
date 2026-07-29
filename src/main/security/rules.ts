@@ -3,6 +3,18 @@ import type { SecurityRuleRaw } from './types.js';
 // Default blocked command rules — extracted from ssh-mcp-multi DEFAULT_BLOCKED_RULES.
 // These catch destructive operations that should never run without explicit override.
 
+// Command-position prefix for system-control rules. Allows the dangerous
+// command to be preceded by a chain boundary (start, ;, &&, ||) and common
+// command wrappers / env-var assignments / flags, so wrapper forms like
+// `env reboot`, `FOO=bar reboot`, `sudo -u root reboot`, `exec reboot`,
+// `chroot / reboot`, `timeout 60 reboot` are still blocked. Deliberately
+// does NOT include bare whitespace or a single `|`, so quoted grep
+// alternations (`grep -E "a|halt|b"`) and argument positions (`last reboot`)
+// are NOT matched. The `-[ug]` element (sudo/su value-flags) is tried before
+// the generic `-\S+` flag so `-u root` is consumed as flag+value.
+const CMD_PREFIX =
+  '(^|;|&&|\\|\\|)\\s*(?:(?:sudo|su|nohup|time|env|exec|command|nice|ionice|pkexec)\\s+|chroot\\s+\\S+\\s+|timeout\\s+\\S+\\s+|-[ug]\\s+\\S+\\s+|-\\S+\\s+|\\w+=\\S+\\s+)*';
+
 export const DEFAULT_BLOCKED_RULES: SecurityRuleRaw[] = [
   // ── Filesystem destruction ──────────────────────────────────────────────
   {
@@ -26,19 +38,35 @@ export const DEFAULT_BLOCKED_RULES: SecurityRuleRaw[] = [
     severity: 'critical',
   },
   // ── System control ──────────────────────────────────────────────────────
+  // Command-position aware via CMD_PREFIX: the dangerous word must be the
+  // segment's command (optionally behind sudo/env/exec/nice/... wrappers or
+  // env-var assignments), NOT an argument. This avoids false positives like
+  // `last reboot` (reboot is an arg to `last`) or `grep -E "shutdown|halt"`
+  // (dangerous words inside a quoted pattern), while still blocking wrapper
+  // forms (`env reboot`, `FOO=bar reboot`, `sudo -u root reboot`, ...).
   {
-    pattern: '(^|\\s|;|&&|\\|\\|)\\s*(shutdown|poweroff|halt)\\b',
+    pattern: `${CMD_PREFIX}(shutdown|poweroff|halt)\\b`,
     reason: '禁止关机 (shutdown/poweroff/halt)',
     severity: 'critical',
   },
   {
-    pattern: '(^|\\s|;|&&|\\|\\|)\\s*reboot\\b',
+    pattern: `${CMD_PREFIX}reboot\\b`,
     reason: '禁止重启 (reboot)',
     severity: 'critical',
   },
   {
-    pattern: '(^|\\s|;|&&|\\|\\|)\\s*init\\s+[06]\\b',
+    pattern: `${CMD_PREFIX}init\\s+[06]\\b`,
     reason: '禁止切换到关机/重启运行级别 (init 0/6)',
+    severity: 'critical',
+  },
+  {
+    pattern: `${CMD_PREFIX}systemctl\\s+(\\S+\\s+)*(reboot|poweroff)(\\s|$)`,
+    reason: '禁止通过 systemctl 重启/关机 (systemctl reboot/poweroff)',
+    severity: 'critical',
+  },
+  {
+    pattern: `${CMD_PREFIX}systemctl\\s+(\\S+\\s+)*(isolate|start|restart)\\s+\\S*(reboot|poweroff|halt)\\.target\\b`,
+    reason: '禁止通过 systemctl 触发关机/重启 target (systemctl isolate/start reboot.target)',
     severity: 'critical',
   },
   // ── Network destruction ─────────────────────────────────────────────────

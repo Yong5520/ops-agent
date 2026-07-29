@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ModelConfigSection } from './ModelConfigSection.js';
 import { HostConfigSection } from './HostConfigSection.js';
 import { SafetyModeSection } from './SafetyModeSection.js';
+import { SecurityRulesSection } from './SecurityRulesSection.js';
 import { HooksSection } from './HooksSection.js';
 import { SkillsSection } from './SkillsSection.js';
 import { useSessionStore } from '../../store/sessionStore.js';
@@ -51,10 +52,13 @@ export function SettingsPage() {
           {tab === 'models' && <ModelConfigSection />}
           {tab === 'hosts' && <HostConfigSection />}
           {tab === 'safety' && (
-            <SafetyModeSection
-              currentMode={safetyMode}
-              onModeChange={(mode: SafetyMode) => setSafetyMode(mode)}
-            />
+            <div className="space-y-6">
+              <SafetyModeSection
+                currentMode={safetyMode}
+                onModeChange={(mode: SafetyMode) => setSafetyMode(mode)}
+              />
+              <SecurityRulesSection />
+            </div>
           )}
           {tab === 'hooks' && <HooksSection />}
           {tab === 'skills' && <SkillsSection />}

@@ -19,6 +19,7 @@ const api: OpsAgentApi = {
       ipcRenderer.invoke('hosts:renameGroup', oldName, newName),
     deleteGroup: (groupName: string) => ipcRenderer.invoke('hosts:deleteGroup', groupName),
     listGroups: () => ipcRenderer.invoke('hosts:listGroups'),
+    createGroup: (name: string) => ipcRenderer.invoke('hosts:createGroup', name),
   },
 
   // Models
@@ -68,6 +69,15 @@ const api: OpsAgentApi = {
     create: (payload) => ipcRenderer.invoke('rules:create', payload),
     update: (id, payload) => ipcRenderer.invoke('rules:update', id, payload),
     remove: (id: string) => ipcRenderer.invoke('rules:delete', id),
+  },
+
+  // Security config file (user-editable default rules)
+  securityConfig: {
+    getFilePath: () => ipcRenderer.invoke('securityConfig:getFilePath'),
+    openFile: () => ipcRenderer.invoke('securityConfig:openFile'),
+    reload: () => ipcRenderer.invoke('securityConfig:reload'),
+    reset: () => ipcRenderer.invoke('securityConfig:reset'),
+    list: () => ipcRenderer.invoke('securityConfig:list'),
   },
 
   // Hooks

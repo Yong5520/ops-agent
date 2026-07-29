@@ -41,7 +41,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 11;
+  const targetVersion = 12;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -220,6 +220,25 @@ function runMigrations(database: DB): void {
     addColumnIfNotExists(database, 'model_providers', 'output_price_per_mtok', 'REAL');
     addColumnIfNotExists(database, 'model_providers', 'cache_read_price_per_mtok', 'REAL');
     addColumnIfNotExists(database, 'model_providers', 'cache_creation_price_per_mtok', 'REAL');
+  }
+
+  if (currentVersion < 12) {
+    // V14: host_groups table - lets users explicitly create (possibly empty)
+    // host folders. Folders were previously implicit (distinct group_name on
+    // hosts), so empty folders could not persist. Seed existing non-default
+    // group names so current folders remain manageable. Additive + idempotent.
+    logger.info(`Running migration v12: host_groups table (explicit host folders)`);
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS host_groups (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT NOT NULL UNIQUE,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_host_groups_name ON host_groups(name);
+      INSERT OR IGNORE INTO host_groups (name)
+        SELECT DISTINCT group_name FROM hosts
+        WHERE group_name IS NOT NULL AND group_name <> 'default';
+    `);
   }
 
   setUserVersion(database, targetVersion);

@@ -1,4 +1,4 @@
-import { ipcMain, type BrowserWindow } from 'electron';
+import { ipcMain, shell, type BrowserWindow } from 'electron';
 import { Channels } from './channels.js';
 import { logger } from '../utils/logger.js';
 import { hostsStore } from '../storage/hosts.js';
@@ -7,6 +7,12 @@ import { sessionsStore } from '../storage/sessions.js';
 import { auditStore } from '../storage/audit.js';
 import { settingsStore } from '../storage/settings.js';
 import { customRulesStore } from '../storage/custom-rules.js';
+import {
+  loadSecurityRulesConfig,
+  resetToFactoryDefaults,
+  reloadSecurityRulesConfig,
+  getRulesFilePath,
+} from '../security/rules-config.js';
 import { hooksStore } from '../storage/hooks.js';
 import { taskListsStore } from '../storage/task-lists.js';
 import { runAgentLoop } from '../agent/loop.js';
@@ -113,6 +119,9 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     hostsStore.deleteGroup(groupName),
   );
   ipcMain.handle(Channels.Hosts.LIST_GROUPS, async () => hostsStore.listGroups());
+  ipcMain.handle(Channels.Hosts.CREATE_GROUP, async (_e, name: string) =>
+    hostsStore.createGroup(name),
+  );
 
   // ---------- Models ----------
   ipcMain.handle(Channels.Models.LIST, async () => modelsStore.list());
@@ -225,6 +234,29 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     customRulesStore.update(id, payload),
   );
   ipcMain.handle(Channels.Rules.DELETE, async (_e, id: string) => customRulesStore.delete(id));
+
+  // ---------- Security config file (user-editable default rules) ----------
+  // The default blocked/allowed rule set lives in {userData}/security-rules.json.
+  // These handlers let the Settings UI show the path, open the file for
+  // editing, reload after an edit, and reset to factory defaults.
+  ipcMain.handle(Channels.SecurityConfig.GET_FILE_PATH, async () => getRulesFilePath());
+  ipcMain.handle(Channels.SecurityConfig.OPEN_FILE, async () => {
+    const filePath = getRulesFilePath();
+    if (!filePath) return { ok: false, error: '路径不可用' };
+    const err = await shell.openPath(filePath);
+    return { ok: !err, error: err || undefined, path: filePath };
+  });
+  ipcMain.handle(Channels.SecurityConfig.RELOAD, async () => {
+    reloadSecurityRulesConfig();
+    return loadSecurityRulesConfig({ force: true });
+  });
+  ipcMain.handle(Channels.SecurityConfig.RESET, async () => {
+    resetToFactoryDefaults();
+    return loadSecurityRulesConfig({ force: true });
+  });
+  ipcMain.handle(Channels.SecurityConfig.LIST, async () =>
+    loadSecurityRulesConfig({ force: true }),
+  );
 
   // ---------- Hooks ----------
   ipcMain.handle(Channels.Hooks.LIST, async () => hooksStore.list());

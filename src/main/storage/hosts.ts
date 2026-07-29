@@ -181,16 +181,36 @@ export const hostsStore = {
     return { created, errors };
   },
 
-  // Rename a host group: update all hosts with oldName to newName.
-  renameGroup(oldName: string, newName: string): number {
+  // Create a new (possibly empty) host group/folder. Stored in host_groups so
+  // it persists even with zero hosts. Idempotent (INSERT OR IGNORE). Trims and
+  // rejects empty names. Returns the created group name.
+  createGroup(name: string): string {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('文件夹名称不能为空');
     const db = getDb();
-    const result = db
-      .prepare("UPDATE hosts SET group_name = ?, updated_at = datetime('now') WHERE group_name = ?")
-      .run(newName, oldName);
-    return result.changes;
+    db.prepare('INSERT OR IGNORE INTO host_groups (name) VALUES (?)').run(trimmed);
+    return trimmed;
   },
 
-  // Delete a host group: move all hosts in the group to 'default'.
+  // Rename a host group: move all hosts with oldName to newName, and update
+  // the host_groups row (drop old, insert new - idempotent if newName exists).
+  renameGroup(oldName: string, newName: string): number {
+    const db = getDb();
+    const rename = db.transaction(() => {
+      const result = db
+        .prepare(
+          "UPDATE hosts SET group_name = ?, updated_at = datetime('now') WHERE group_name = ?",
+        )
+        .run(newName, oldName);
+      db.prepare('DELETE FROM host_groups WHERE name = ?').run(oldName);
+      db.prepare('INSERT OR IGNORE INTO host_groups (name) VALUES (?)').run(newName);
+      return result.changes;
+    });
+    return rename();
+  },
+
+  // Delete a host group: move all hosts in the group to 'default' and remove
+  // the host_groups row so the (now-empty) folder disappears.
   deleteGroup(groupName: string): number {
     if (groupName === 'default') return 0; // Cannot delete default group
     const db = getDb();
@@ -199,14 +219,23 @@ export const hostsStore = {
         "UPDATE hosts SET group_name = 'default', updated_at = datetime('now') WHERE group_name = ?",
       )
       .run(groupName);
+    db.prepare('DELETE FROM host_groups WHERE name = ?').run(groupName);
     return result.changes;
   },
 
-  // List all distinct group names.
+  // List all group names: union explicitly-created host_groups folders (which
+  // may be empty) with distinct group_name values from hosts (which always
+  // includes 'default' once any host exists).
   listGroups(): string[] {
     const rows = getDb()
-      .prepare('SELECT DISTINCT group_name FROM hosts ORDER BY group_name ASC')
-      .all() as Array<{ group_name: string }>;
-    return rows.map((r) => r.group_name);
+      .prepare(
+        `SELECT name FROM (
+          SELECT name FROM host_groups
+          UNION
+          SELECT DISTINCT group_name AS name FROM hosts WHERE group_name IS NOT NULL
+        ) ORDER BY name ASC`,
+      )
+      .all() as Array<{ name: string }>;
+    return rows.map((r) => r.name);
   },
 };

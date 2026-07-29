@@ -3,32 +3,51 @@ import type {
   SecurityRuleRaw,
   SecurityCheckResult,
   EffectiveSecurityConfig,
+  Severity,
 } from './types.js';
 import type { CustomRule } from '../../shared/types.js';
-import { DEFAULT_BLOCKED_RULES } from './rules.js';
-import { classifyCommand } from './classifier.js';
+import { classifyCommand, splitChain } from './classifier.js';
 import { customRulesStore } from '../storage/custom-rules.js';
+import { loadSecurityRulesConfig } from './rules-config.js';
+import { logger } from '../utils/logger.js';
 
 // ── Rule compilation ──────────────────────────────────────────────────────
 
 // Compile raw string-pattern rules into RegExp-backed rules.
 // Patterns are case-insensitive to catch RM, Sudo, etc.
+// A single malformed pattern (e.g. a stray `[` from a user editing the config
+// file) is skipped with a warning rather than throwing - one bad rule must not
+// disable the whole security engine.
 export function compileRules(raw: SecurityRuleRaw[]): SecurityRule[] {
-  return raw.map((r) => ({
-    pattern: new RegExp(r.pattern, 'i'),
-    reason: r.reason,
-    severity: r.severity ?? 'high',
-  }));
+  const compiled: SecurityRule[] = [];
+  for (const r of raw) {
+    try {
+      compiled.push({
+        pattern: new RegExp(r.pattern, 'i'),
+        reason: r.reason,
+        severity: r.severity ?? 'high',
+      });
+    } catch (err) {
+      logger.warn(
+        `[Security] Skipping invalid rule pattern "${r.pattern}" (${r.reason}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return compiled;
 }
 
 // ── Command chain splitting ───────────────────────────────────────────────
 
 // Split a compound shell command by operators: ; || && |& |
 // Each segment is checked independently so blocked patterns can't sneak
-// through inside a pipe chain.
+// through inside a pipe chain. Delegates to the classifier's quote-aware
+// `splitChain` so pipes/semicolons inside quoted strings (e.g. a
+// `grep -E "shutdown|halt"` alternation) are NOT mistaken for chain
+// operators - a quote-naive split here caused false-positive blocks.
 export function splitCommandChain(command: string): string[] {
-  const segments = command.split(/\s*(?:;|\|\||&&|\|&|\|)\s*/);
-  return segments.map((s) => s.trim()).filter((s) => s.length > 0);
+  return splitChain(command);
 }
 
 // ── Subshell content extraction ──────────────────────────────────────────
@@ -69,22 +88,40 @@ function customRulesToRaw(rules: CustomRule[], type: 'blocked' | 'allowed'): Sec
 // ── Effective config assembly ─────────────────────────────────────────────
 
 // Build the effective security config for a given safety mode by merging:
-//   1. Default blocked rules
-//   2. Custom rules from DB (global + all hosts, grouped by host)
+//   1. Default blocked/allowed rules from the on-disk config file
+//      ({userData}/security-rules.json, seeded from factory defaults). The
+//      file is the user-editable source of truth for the default rule set.
+//   2. Custom rules from DB (global + all hosts, grouped by host) layered on
+//      top - these are UI-managed additions and per-host overrides.
 // The result is cached per mode for the process lifetime; host-level
 // overrides are looked up by hostId at check time.
 let cachedConfig: EffectiveSecurityConfig | null = null;
+
+// Filter out disabled rules (enabled === false) from a config-file entry list
+// and project to the raw shape compileRules expects.
+function activeConfigRules(
+  entries: { pattern: string; reason: string; severity?: Severity; enabled?: boolean }[],
+): SecurityRuleRaw[] {
+  return entries
+    .filter((r) => r.enabled !== false)
+    .map((r) => ({ pattern: r.pattern, reason: r.reason, severity: r.severity }));
+}
 
 function buildEffectiveConfig(mode: EffectiveSecurityConfig['mode']): EffectiveSecurityConfig {
   const allCustom = customRulesStore.list();
   const globalBlocked = allCustom.filter((r) => r.type === 'blocked' && r.hostId == null);
   const globalAllowed = allCustom.filter((r) => r.type === 'allowed' && r.hostId == null);
 
+  const fileConfig = loadSecurityRulesConfig();
+
   const blocked = compileRules([
-    ...DEFAULT_BLOCKED_RULES,
+    ...activeConfigRules(fileConfig.blockedRules),
     ...customRulesToRaw(globalBlocked, 'blocked'),
   ]);
-  const allowed = compileRules(customRulesToRaw(globalAllowed, 'allowed'));
+  const allowed = compileRules([
+    ...activeConfigRules(fileConfig.allowedRules),
+    ...customRulesToRaw(globalAllowed, 'allowed'),
+  ]);
 
   const hostOverrides = new Map<string, { blocked?: SecurityRule[]; allowed?: SecurityRule[] }>();
   for (const rule of allCustom) {

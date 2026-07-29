@@ -251,6 +251,24 @@ export interface SkillFileInput {
   content: string;
 }
 
+// View of the on-disk security rules config ({userData}/security-rules.json)
+// returned to the renderer for read-only display. Mirrors SecurityRulesConfig
+// from src/main/security/rules-config.ts without coupling the preload types
+// to that module's internals.
+export interface SecurityRuleConfigEntryView {
+  id?: string;
+  pattern: string;
+  reason: string;
+  severity?: 'critical' | 'high' | 'medium' | 'low';
+  enabled?: boolean;
+}
+
+export interface SecurityRulesConfigView {
+  version: number;
+  blockedRules: SecurityRuleConfigEntryView[];
+  allowedRules: SecurityRuleConfigEntryView[];
+}
+
 export interface OpsAgentApi {
   ping: () => Promise<string>;
 
@@ -277,6 +295,7 @@ export interface OpsAgentApi {
     renameGroup: (oldName: string, newName: string) => Promise<number>;
     deleteGroup: (groupName: string) => Promise<number>;
     listGroups: () => Promise<string[]>;
+    createGroup: (name: string) => Promise<string>;
   };
 
   models: {
@@ -323,6 +342,15 @@ export interface OpsAgentApi {
     create: (payload: CustomRuleInput) => Promise<CustomRule>;
     update: (id: string, payload: Partial<CustomRuleInput>) => Promise<CustomRule>;
     remove: (id: string) => Promise<void>;
+  };
+
+  securityConfig: {
+    // User-editable security rules config file ({userData}/security-rules.json)
+    getFilePath: () => Promise<string | null>;
+    openFile: () => Promise<{ ok: boolean; error?: string; path?: string }>;
+    reload: () => Promise<SecurityRulesConfigView>;
+    reset: () => Promise<SecurityRulesConfigView>;
+    list: () => Promise<SecurityRulesConfigView>;
   };
 
   hooks: {

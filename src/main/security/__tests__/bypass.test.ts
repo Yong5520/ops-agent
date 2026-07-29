@@ -272,3 +272,110 @@ describe('redirect to /dev/null does not force WRITE', () => {
     expect(result.commandType).toBe('READ');
   });
 });
+
+// ── False-positive diagnostics (must be ALLOWED) ─────────────────────────
+// Regression: read-only diagnostic commands were blocked because (a) the
+// engine split compound commands with a quote-NAIVE splitter, fracturing
+// quoted grep alternation patterns like "shutdown|halt|power" into bare
+// `halt`/`reboot`/`poweroff` segments that matched blocked rules; and
+// (b) the system-control rules matched a dangerous word preceded by
+// whitespace ANYWHERE, so `last reboot` (reboot is an arg to `last`) was
+// treated as the reboot command.
+describe('false-positive diagnostic commands (must be allowed)', () => {
+  const diagnosticCommands = [
+    'last reboot | head -20',
+    'journalctl -b -1 --no-pager | grep -iE "shutdown|halt|power|panic|oom|error|fatal|killed|watchdog|acpi.*power|systemd-logind|stopping|deactivating" | tail -30',
+    'grep -E "shutdown|reboot|halt|poweroff" /var/log/auth.log* 2>/dev/null | grep "Jul  2[4-7]" | tail -20',
+    'journalctl -b -1 --no-pager | grep -iE "stopping|deactivating|halt|power|systemd.*stop|target.*shutdown|reached target" | tail -30',
+    // Extra guards: dangerous words as arguments/strings must not be blocked
+    'grep -E "reboot" /var/log/messages',
+    'echo shutdown',
+    'echo "reboot"',
+    'last reboot',
+  ];
+
+  for (const cmd of diagnosticCommands) {
+    it(`allows: ${cmd.length > 60 ? cmd.slice(0, 60) + '...' : cmd}`, () => {
+      const result = checkCommandSecurity(cmd, undefined, config);
+      expect(result.allowed).toBe(true);
+      expect(result.commandType).not.toBe('BLOCKED');
+    });
+  }
+});
+
+// ── System-control commands (must stay BLOCKED) ──────────────────────────
+// Guards against the rule fix (command-position-aware) over-relaxing and
+// letting real shutdown/reboot commands through.
+describe('system-control commands (must stay blocked)', () => {
+  const blockedCmds = [
+    'reboot',
+    'sudo reboot',
+    'nohup reboot',
+    'time reboot',
+    'shutdown -h now',
+    'sudo shutdown -h now',
+    'poweroff',
+    'halt',
+    'init 0',
+    'init 6',
+    'systemctl reboot',
+    'systemctl poweroff',
+    'sudo systemctl reboot',
+    // Wrapper forms - must NOT bypass the blocklist (regression guards)
+    'env reboot',
+    'env shutdown -h now',
+    'env poweroff',
+    'env halt',
+    'env FOO=bar reboot',
+    'FOO=bar reboot',
+    'FOO=bar shutdown -h now',
+    'sudo -n reboot',
+    'sudo -u root reboot',
+    'sudo -E reboot',
+    'exec reboot',
+    'command reboot',
+    'nice reboot',
+    'ionice reboot',
+    'pkexec reboot',
+    'chroot / reboot',
+    'timeout 60 reboot',
+    'systemctl isolate reboot.target',
+    'systemctl start reboot.target',
+    'systemctl isolate poweroff.target',
+    'systemctl start halt.target',
+  ];
+
+  for (const cmd of blockedCmds) {
+    it(`blocks: ${cmd}`, () => {
+      const result = checkCommandSecurity(cmd, undefined, config);
+      expect(result.allowed).toBe(false);
+      expect(result.commandType).toBe('BLOCKED');
+      expect(result.reason).toBeTruthy();
+    });
+  }
+});
+
+// ── Read-only wrapper/pattern forms (must stay allowed) ──────────────────
+// Ensures the broadened prefix doesn't over-block read-only commands that
+// happen to use a wrapper or contain a dangerous word as an argument/pattern.
+describe('read-only wrapper/pattern forms (must stay allowed)', () => {
+  const allowedCmds = [
+    'env ls',
+    'nice ls -la',
+    'time echo reboot',
+    'exec echo shutdown',
+    'last reboot',
+    'echo shutdown',
+    'systemctl status nginx',
+    'systemctl status reboot.service',
+    'systemctl status reboot.target',
+    'grep -E "shutdown|reboot|halt|poweroff" /var/log/messages',
+  ];
+  for (const cmd of allowedCmds) {
+    it(`allows: ${cmd}`, () => {
+      const result = checkCommandSecurity(cmd, undefined, config);
+      expect(result.allowed).toBe(true);
+      expect(result.commandType).not.toBe('BLOCKED');
+    });
+  }
+});

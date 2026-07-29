@@ -3,6 +3,7 @@ import type { HostConfig, HostInput } from '../../shared/types.js';
 
 interface HostStore {
   hosts: HostConfig[];
+  groups: string[];
   loading: boolean;
   error: string | null;
   load: () => Promise<void>;
@@ -16,18 +17,23 @@ interface HostStore {
   }>;
   renameGroup: (oldName: string, newName: string) => Promise<void>;
   deleteGroup: (groupName: string) => Promise<void>;
+  createGroup: (name: string) => Promise<void>;
 }
 
 export const useHostStore = create<HostStore>((set, get) => ({
   hosts: [],
+  groups: [],
   loading: false,
   error: null,
 
   load: async () => {
     set({ loading: true, error: null });
     try {
-      const hosts = await window.opsAgent.hosts.list();
-      set({ hosts, loading: false });
+      const [hosts, groups] = await Promise.all([
+        window.opsAgent.hosts.list(),
+        window.opsAgent.hosts.listGroups(),
+      ]);
+      set({ hosts, groups, loading: false });
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
     }
@@ -70,6 +76,11 @@ export const useHostStore = create<HostStore>((set, get) => ({
 
   deleteGroup: async (groupName) => {
     await window.opsAgent.hosts.deleteGroup(groupName);
+    await get().load();
+  },
+
+  createGroup: async (name) => {
+    await window.opsAgent.hosts.createGroup(name);
     await get().load();
   },
 }));

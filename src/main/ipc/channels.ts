@@ -16,6 +16,7 @@ export const Channels = {
     RENAME_GROUP: 'hosts:renameGroup',
     DELETE_GROUP: 'hosts:deleteGroup',
     LIST_GROUPS: 'hosts:listGroups',
+    CREATE_GROUP: 'hosts:createGroup',
   },
   Models: {
     LIST: 'models:list',
@@ -54,6 +55,14 @@ export const Channels = {
     CREATE: 'rules:create',
     UPDATE: 'rules:update',
     DELETE: 'rules:delete',
+  },
+  SecurityConfig: {
+    // User-editable security rules config file ({userData}/security-rules.json)
+    GET_FILE_PATH: 'securityConfig:getFilePath',
+    OPEN_FILE: 'securityConfig:openFile',
+    RELOAD: 'securityConfig:reload',
+    RESET: 'securityConfig:reset',
+    LIST: 'securityConfig:list',
   },
   Hooks: {
     LIST: 'hooks:list',

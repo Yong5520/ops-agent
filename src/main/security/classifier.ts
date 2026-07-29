@@ -318,7 +318,10 @@ const SEVERITY: Record<CommandType, number> = {
 // Quote-aware split of compound commands by shell operators: |, ;, &&, ||, |&
 // Respects single and double quotes so pipes inside strings like
 // `grep "a|b"` or `echo 'a;b'` are NOT treated as chain operators.
-function splitChain(command: string): string[] {
+// Exported so the security engine shares the same quote-aware splitter -
+// a quote-naive splitter in the engine would fracture `grep -E "a|b|c"`
+// into bare `b`/`c` segments that false-positive against blocked rules.
+export function splitChain(command: string): string[] {
   const segments: string[] = [];
   let current = '';
   let inSingle = false;

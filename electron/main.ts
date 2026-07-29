@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { registerIpcHandlers, cleanupTerminalSessions } from '../src/main/ipc/handlers.js';
 import { initDatabase } from '../src/main/storage/database.js';
 import { cleanupOldResults, setResultsBaseDir } from '../src/main/agent/tool-results.js';
+import { seedFactoryDefaultsIfMissing } from '../src/main/security/rules-config.js';
 import { logger } from '../src/main/utils/logger.js';
 
 let mainWindow: BrowserWindow | null = null;
@@ -46,6 +47,9 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(() => {
   try {
     initDatabase();
+    // Ensure the user-editable security rules config file exists (seeded from
+    // factory defaults on first run; never clobbers existing user edits).
+    seedFactoryDefaultsIfMissing();
     setResultsBaseDir(join(app.getPath('userData'), 'tool-results'));
     cleanupOldResults(7);
   } catch (err) {

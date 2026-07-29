@@ -1,11 +1,11 @@
 import { hostsStore } from '../storage/hosts.js';
 import { MODE_DESCRIPTIONS } from '../security/modes.js';
-import { DEFAULT_BLOCKED_RULES } from '../security/rules.js';
+import { loadSecurityRulesConfig } from '../security/rules-config.js';
 import { getEnabledSkills } from './skills/index.js';
 import { buildMemoryPromptSection } from './memory/claudemd.js';
 import { loadAutoMemory } from './memory/automem.js';
 import type { HostFacts } from './facts.js';
-import type { SafetyMode } from '../../shared/types.js';
+import type { SafetyMode, TodoItem } from '../../shared/types.js';
 
 // Dynamic System Prompt builder - assembles the system prompt from:
 //   1. Base role definition
@@ -26,6 +26,10 @@ export interface SystemPromptParams {
   // starts the session knowing the OS, kernel, failed services, etc.,
   // saving 2-3 tool calls per diagnostic session.
   hostFacts?: HostFacts[];
+  // Optional: persisted todo list for the session. When provided (non-empty),
+  // a "当前任务列表进度" section is injected so a resumed session continues
+  // from the last completed step instead of re-planning from scratch.
+  todos?: TodoItem[];
 }
 
 // Split system prompt for prompt-cache optimization.
@@ -151,8 +155,34 @@ ${
       : '- 所有命令类型：自动执行，无需用户确认\n- 你需要自行判断操作风险，谨慎决策'
 }`);
 
-  // -- 5. Security rules (static, never changes) ----------------------------
-  const ruleSummary = DEFAULT_BLOCKED_RULES.map((r) => `- ${r.reason}`).join('\n');
+  // -- 4b. Task list progress (dynamic - resume support) -------------------
+  // Inject the persisted todo list so a resumed session continues from the
+  // last completed step instead of re-planning from scratch. The list is
+  // read back from task_lists at the start of each run (loop.ts) and passed
+  // in here; this is the missing "read-back" half of the Claude Code-style
+  // todo resume flow (persistence half already worked via todo_write).
+  if (params.todos && params.todos.length > 0) {
+    const lines = params.todos.map((t) => {
+      const mark = t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[▶]' : '[ ]';
+      const label =
+        t.status === 'completed' ? '已完成' : t.status === 'in_progress' ? '进行中' : '待办';
+      return `- ${mark} ${label}: ${t.subject}`;
+    });
+    const hasIncomplete = params.todos.some(
+      (t) => t.status === 'in_progress' || t.status === 'pending',
+    );
+    const directive = hasIncomplete
+      ? '\n\n检测到未完成任务列表。请从第一个未完成（进行中/待办）步骤继续执行；**不要重新创建任务列表，不要重复执行已完成的步骤**；仅通过 todo_write 工具推进状态。'
+      : '\n\n所有步骤均已完成。如用户有新需求，再创建新的任务列表。';
+    dynamicSections.push(`## 当前任务列表进度\n\n${lines.join('\n')}${directive}`);
+  }
+
+  // -- 5. Security rules (reflects the on-disk config file) ----------------
+  // Built from loadSecurityRulesConfig() so the model's guidance tracks what
+  // the engine actually enforces - if the user disables/adds a rule in
+  // security-rules.json, the model sees the updated set (no divergence).
+  const enabledBlocked = loadSecurityRulesConfig().blockedRules.filter((r) => r.enabled !== false);
+  const ruleSummary = [...new Set(enabledBlocked.map((r) => `- ${r.reason}`))].join('\n');
   staticSections.push(`## 安全规则（不可绕过）
 
 以下命令会被安全引擎硬拦截，不要尝试执行：
@@ -234,7 +264,7 @@ ${skillList}
 11. **多主机操作**：用户指定多台主机时，按主机分组报告结果，注意差异
 12. **持续诊断**：诊断过程未完成（仍在收集信息阶段）时，应主动继续调用工具收集信息，而非停下来等待用户催促。但诊断完成、已得出结论后，应给出结论并停止--**不要在用户只要求分析时擅自继续执行修复操作**
 13. **结论优先**：如果本轮已执行过工具调用，结束前必须给出至少一段实质性的分析或结论，不能以"让我检查X"结尾就停止
-14. **任务管理**：复杂任务（3 步以上）必须先调用 todo_write 工具创建任务列表，再开始执行。开始执行任务前将状态标记为 in_progress，完成后立即标记为 completed。不要批量标记。任务列表变化时实时同步。每次只保持一个 in_progress 任务
+14. **任务管理**：复杂任务（3 步以上）必须先调用 todo_write 工具创建任务列表，再开始执行。开始执行任务前将状态标记为 in_progress，完成后立即标记为 completed。不要批量标记。任务列表变化时实时同步。每次只保持一个 in_progress 任务。**会话恢复时**：若上下文中已提供“当前任务列表进度”，必须从第一个未完成步骤续做，不得重新规划或重复已完成步骤
 15. **记忆沉淀**：当发现主机特性（如非标准日志路径）、用户偏好、可复用的诊断结论时，使用 update_memory 工具记录到 MEMORY.md。不要记录敏感信息（密码、密钥）。这些记忆会跨会话持久保存
 16. **计划模式**：当处于 plan 模式时，仅允许执行 READ 命令进行诊断。完成诊断后，必须调用 exit_plan_mode 工具提交结构化计划（包含：问题分析、执行步骤、风险评估、验证方法）。用户审批后系统自动切换到 operator 模式，方可执行写操作。如果用户拒绝，根据反馈修订计划后重新提交
 17. **sudo_exec 不加 sudo 前缀**：使用 sudo_exec 工具时，**不要**在命令前加 \`sudo\` 前缀。该工具会自动通过 \`sudo -S sh -c\` 包装命令。例如：正确用法是 \`apt update\`，而不是 \`sudo apt update\`。加 sudo 前缀会导致双重 sudo 认证失败

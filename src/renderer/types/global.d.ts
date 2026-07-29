@@ -270,6 +270,22 @@ interface SkillFileInput {
   content: string;
 }
 
+// View of the on-disk security rules config returned to the renderer.
+// Mirrors the SecurityRulesConfigView in preload-api.ts (kept in sync).
+interface SecurityRuleConfigEntryView {
+  id?: string;
+  pattern: string;
+  reason: string;
+  severity?: 'critical' | 'high' | 'medium' | 'low';
+  enabled?: boolean;
+}
+
+interface SecurityRulesConfigView {
+  version: number;
+  blockedRules: SecurityRuleConfigEntryView[];
+  allowedRules: SecurityRuleConfigEntryView[];
+}
+
 interface OpsAgentApi {
   ping: () => Promise<string>;
   hosts: {
@@ -295,6 +311,7 @@ interface OpsAgentApi {
     renameGroup: (oldName: string, newName: string) => Promise<number>;
     deleteGroup: (groupName: string) => Promise<number>;
     listGroups: () => Promise<string[]>;
+    createGroup: (name: string) => Promise<string>;
   };
   models: {
     list: () => Promise<ModelProvider[]>;
@@ -336,6 +353,13 @@ interface OpsAgentApi {
     create: (payload: CustomRuleInput) => Promise<CustomRule>;
     update: (id: string, payload: Partial<CustomRuleInput>) => Promise<CustomRule>;
     remove: (id: string) => Promise<void>;
+  };
+  securityConfig: {
+    getFilePath: () => Promise<string | null>;
+    openFile: () => Promise<{ ok: boolean; error?: string; path?: string }>;
+    reload: () => Promise<SecurityRulesConfigView>;
+    reset: () => Promise<SecurityRulesConfigView>;
+    list: () => Promise<SecurityRulesConfigView>;
   };
   hooks: {
     list: () => Promise<Hook[]>;

@@ -42,6 +42,16 @@ describe('compileRules', () => {
     const rules = compileRules([{ pattern: 'test', reason: 'test' }]);
     expect(rules[0].severity).toBe('high');
   });
+
+  it('skips invalid regex patterns without throwing (one bad rule must not disable the engine)', () => {
+    const rules = compileRules([
+      { pattern: 'valid-pattern', reason: 'ok', severity: 'high' },
+      { pattern: '[unclosed-bracket', reason: 'bad', severity: 'high' },
+      { pattern: 'also-valid', reason: 'ok2' },
+    ]);
+    expect(rules).toHaveLength(2);
+    expect(rules.map((r) => r.reason)).toEqual(['ok', 'ok2']);
+  });
 });
 
 describe('splitCommandChain', () => {
@@ -71,6 +81,27 @@ describe('splitCommandChain', () => {
 
   it('trims whitespace', () => {
     expect(splitCommandChain('  ls  ;  pwd  ')).toEqual(['ls', 'pwd']);
+  });
+
+  // Regression: the splitter MUST be quote-aware so pipes inside quoted
+  // strings (e.g. a grep -E alternation pattern) are not treated as chain
+  // operators. A quote-naive split fractures `grep -E "a|b|c"` into bare
+  // `b`/`c` segments that can false-positive against blocked rules.
+  it('does not split pipes inside double quotes', () => {
+    expect(splitCommandChain('grep -E "shutdown|halt|power" /var/log/messages')).toEqual([
+      'grep -E "shutdown|halt|power" /var/log/messages',
+    ]);
+  });
+
+  it('does not split pipes inside single quotes', () => {
+    expect(splitCommandChain('awk \'{print $1 | "cmd"}\'')).toEqual(['awk \'{print $1 | "cmd"}\'']);
+  });
+
+  it('still splits real pipes outside quotes alongside quoted pipes', () => {
+    expect(splitCommandChain('grep -E "a|b" file | tail -5')).toEqual([
+      'grep -E "a|b" file',
+      'tail -5',
+    ]);
   });
 });
 

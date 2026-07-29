@@ -3,6 +3,7 @@ import { useHostStore } from '../../store/hostStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { Input, Field, Select } from '../../components/Form.js';
+import { GroupCreateInput } from './GroupCreateInput.js';
 import type { HostConfig, HostInput, AuthType } from '../../../shared/types.js';
 
 interface HostStatus {
@@ -35,7 +36,7 @@ function saveCollapsed(set: Set<string>): void {
 }
 
 export function HostConfigSection() {
-  const { hosts, load, create, update, remove } = useHostStore();
+  const { hosts, groups, load, create, update, remove, createGroup } = useHostStore();
   const [editing, setEditing] = useState<HostConfig | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -43,6 +44,8 @@ export function HostConfigSection() {
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
   const [editingGroup, setEditingGroup] = useState<string | null>(null);
   const [groupEditName, setGroupEditName] = useState('');
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [groupError, setGroupError] = useState<string | null>(null);
 
   useEffect(() => {
     load();
@@ -127,6 +130,21 @@ export function HostConfigSection() {
     await load();
   };
 
+  const handleCreateGroup = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setGroupError('文件夹名称不能为空');
+      return;
+    }
+    setGroupError(null);
+    try {
+      await createGroup(trimmed);
+      setCreatingGroup(false);
+    } catch (err) {
+      setGroupError((err as Error).message || '创建失败');
+    }
+  };
+
   // Group hosts by groupName for organized display
   const grouped = hosts.reduce(
     (acc, h) => {
@@ -136,6 +154,15 @@ export function HostConfigSection() {
     },
     {} as Record<string, HostConfig[]>,
   );
+  // Render order: explicitly-created folders (incl. empty ones from host_groups)
+  // unioned with any folders that currently hold hosts. 'default' first, then
+  // the rest alphabetical. Empty folders render with a placeholder.
+  const allGroups = Array.from(new Set([...groups, ...Object.keys(grouped)]));
+  allGroups.sort((a, b) => {
+    if (a === 'default') return -1;
+    if (b === 'default') return 1;
+    return a.localeCompare(b);
+  });
 
   return (
     <div className="space-y-4">
@@ -144,6 +171,16 @@ export function HostConfigSection() {
         <div className="flex gap-1.5">
           <Button variant="ghost" size="sm" onClick={() => setShowImport(true)}>
             批量导入
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setCreatingGroup(true);
+              setGroupError(null);
+            }}
+          >
+            新建文件夹
           </Button>
           <Button
             variant="primary"
@@ -158,13 +195,25 @@ export function HostConfigSection() {
         </div>
       </div>
 
+      {creatingGroup && (
+        <GroupCreateInput
+          onCreate={handleCreateGroup}
+          onCancel={() => {
+            setCreatingGroup(false);
+            setGroupError(null);
+          }}
+          error={groupError}
+        />
+      )}
+
       <div className="space-y-3">
         {hosts.length === 0 && !showForm && (
           <p className="rounded-md border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-600">
             尚未配置任何主机。点击"添加主机"或"批量导入"开始。
           </p>
         )}
-        {Object.entries(grouped).map(([group, groupHosts]) => {
+        {allGroups.map((group) => {
+          const groupHosts = grouped[group] ?? [];
           const isCollapsed = collapsed.has(group);
           return (
             <div key={group}>
@@ -225,6 +274,11 @@ export function HostConfigSection() {
               </div>
               {!isCollapsed && (
                 <div className="space-y-2">
+                  {groupHosts.length === 0 && (
+                    <p className="rounded-md border border-dashed border-zinc-800 px-3 py-4 text-center text-xs text-zinc-600">
+                      此文件夹暂无主机
+                    </p>
+                  )}
                   {groupHosts.map((h) => {
                     const status = statuses.get(h.id);
                     const isConnected = status?.state === 'connected';
