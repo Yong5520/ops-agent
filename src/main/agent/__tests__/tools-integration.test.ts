@@ -20,12 +20,16 @@ const mocks = vi.hoisted(() => ({
   hostsGetByName: vi.fn(),
   hostsGet: vi.fn(),
   hooksListEnabled: vi.fn(() => [] as unknown[]),
+  // connectionPool.get mock - default returns a generic manager. Per-host
+  // tests (V3-08 exec_multi) override this to return a manager carrying the
+  // host id so execCommand-mock can distinguish hosts.
+  poolGet: vi.fn().mockResolvedValue({ id: 'mock-mgr', isConnected: () => true }),
 }));
 
 // ── Mock SSH layer ──────────────────────────────────────────────────────
 vi.mock('../../ssh/index.js', () => ({
   connectionPool: {
-    get: vi.fn().mockResolvedValue({ id: 'mock-mgr', isConnected: () => true }),
+    get: mocks.poolGet,
     invalidate: vi.fn(),
     listStatus: vi.fn(() => []),
   },
@@ -126,6 +130,10 @@ beforeEach(() => {
   mocks.hostsGetByName.mockReturnValue(testHost);
   mocks.hostsGet.mockReturnValue(testHost);
   mocks.hooksListEnabled.mockReturnValue([]);
+  // L2 fix: reset poolGet to the default generic manager. makeMultiHostTools
+  // overrides this per-test; without the reset, that per-host impl would leak
+  // into later describe blocks (clearAllMocks does not reset implementations).
+  mocks.poolGet.mockResolvedValue({ id: 'mock-mgr', isConnected: () => true });
   mocks.execCommand.mockResolvedValue({
     stdout: 'ok',
     stderr: '',
@@ -462,6 +470,222 @@ describe('P1-1 Integration: Concurrency + Large Result Persistence', () => {
     // tail_log now resolves with the partial output.
     const result = await tailPromise;
     expect(result).toMatchObject({ stdout: 'partial-line\n' });
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// V3-08: exec_multi batch multi-host
+// ════════════════════════════════════════════════════════════════════════
+describe('V3-08 Integration: exec_multi batch multi-host', () => {
+  const host1: HostConfig = { ...testHost, id: 'host-1', name: 'web-1' };
+  const host2: HostConfig = { ...testHost, id: 'host-2', name: 'web-2' };
+
+  function makeMultiHostTools(safetyMode: 'autopilot' | 'sentinel' = 'autopilot') {
+    // hostsGet returns the right host per id; hostsGetByName resolves by name.
+    mocks.hostsGet.mockImplementation((id: string) =>
+      id === 'host-1' ? host1 : id === 'host-2' ? host2 : null,
+    );
+    mocks.hostsGetByName.mockImplementation((name: string) =>
+      name === 'web-1' ? host1 : name === 'web-2' ? host2 : undefined,
+    );
+    // poolGet returns a manager carrying the requested host id, so the
+    // execCommand mock can distinguish which host it is running on.
+    mocks.poolGet.mockImplementation(async (hostId: string) => ({
+      id: hostId,
+      isConnected: () => true,
+    }));
+    return makeTools({ safetyMode, hostIds: ['host-1', 'host-2'] });
+  }
+
+  it('fans out a READ command to all session hosts and aggregates results', async () => {
+    const { tools } = makeMultiHostTools();
+    mocks.execCommand.mockResolvedValue({
+      stdout: 'disk: 80%',
+      stderr: '',
+      exitCode: 0,
+      durationMs: 5,
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'df -h /',
+      description: 'check disk on all web hosts',
+    })) as {
+      byHost: Record<string, { ok: boolean; stdout: string }>;
+      totalCount: number;
+      successCount: number;
+      failedCount: number;
+      divergent: boolean;
+    };
+
+    // Ran on both hosts in parallel.
+    expect(mocks.execCommand).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      totalCount: 2,
+      successCount: 2,
+      failedCount: 0,
+      divergent: false,
+    });
+    expect(result.byHost['web-1']).toMatchObject({ ok: true, stdout: 'disk: 80%' });
+    expect(result.byHost['web-2']).toMatchObject({ ok: true, stdout: 'disk: 80%' });
+  });
+
+  it('a host failure does not abort the others (allSettled)', async () => {
+    const { tools } = makeMultiHostTools();
+    // web-1 succeeds, web-2 throws a connection error.
+    mocks.execCommand.mockImplementation(async (mgr) => {
+      const hostId = (mgr as { id?: string }).id;
+      if (hostId === 'host-2') throw new Error('SSH connection lost');
+      return { stdout: 'ok', stderr: '', exitCode: 0, durationMs: 5 };
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'uptime',
+      description: 'check uptime on all hosts',
+    })) as {
+      byHost: Record<string, { ok: boolean }>;
+      totalCount: number;
+      successCount: number;
+      failedCount: number;
+    };
+
+    expect(result).toMatchObject({ totalCount: 2, successCount: 1, failedCount: 1 });
+    expect(result.byHost['web-1'].ok).toBe(true);
+    expect(result.byHost['web-2'].ok).toBe(false);
+  });
+
+  it('flags divergent outputs across succeeding hosts', async () => {
+    const { tools } = makeMultiHostTools();
+    mocks.execCommand.mockImplementation(async (mgr) => {
+      const hostId = (mgr as { id?: string }).id;
+      return {
+        stdout: hostId === 'host-1' ? 'active' : 'inactive',
+        stderr: '',
+        exitCode: 0,
+        durationMs: 5,
+      };
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'systemctl is-active nginx',
+      description: 'compare nginx state across hosts',
+    })) as { divergent: boolean; distinctOutputCount: number };
+
+    expect(result.divergent).toBe(true);
+    expect(result.distinctOutputCount).toBe(2);
+  });
+
+  it('rejects WRITE commands (READ-only in this cut)', async () => {
+    const { tools } = makeMultiHostTools();
+    // A write-like command the classifier will flag as WRITE/SUDO/BLOCKED.
+    // `rm` is a destructive write command.
+    const result = await callTool(tools, 'exec_multi', {
+      command: 'rm /tmp/file',
+      description: 'remove a file on all hosts',
+    });
+
+    expect(result).toMatchObject({ error: expect.any(String), blocked: true });
+  });
+
+  it('targets an explicit host subset when hosts[] is provided', async () => {
+    const { tools } = makeMultiHostTools();
+    mocks.execCommand.mockResolvedValue({
+      stdout: 'ok',
+      stderr: '',
+      exitCode: 0,
+      durationMs: 5,
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'hostname',
+      hosts: ['web-1'],
+      description: 'check one host only',
+    })) as { totalCount: number };
+
+    expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    expect(result.totalCount).toBe(1);
+  });
+
+  it('V3-08 H1: a host-specific security block is honored per-host (not bypassed)', async () => {
+    // host-2 has a host-specific blocked rule that host-1 lacks. The global
+    // pre-check (targets[0] = host-1) passes, but the per-host re-check inside
+    // the fan-out must block host-2 - it must NOT execute there.
+    // NOTE: securityConfig is captured at createTools time (getEffectiveConfig
+    // reads customRulesStore.list), so the rule mock MUST be set before makeTools.
+    const { customRulesStore } = await import('../../storage/custom-rules.js');
+    (customRulesStore as { list: () => unknown[] }).list = vi.fn(() => [
+      {
+        id: 'rule-host2-block',
+        name: 'block host-2 df',
+        type: 'blocked',
+        pattern: 'df',
+        commandType: 'BLOCKED',
+        hostId: 'host-2', // host-specific override (engine.ts hostOverrides)
+        enabled: true,
+        createdAt: '2026-01-01',
+      },
+    ]);
+
+    const { tools } = makeMultiHostTools();
+    let host2Executed = false;
+    mocks.execCommand.mockImplementation(async (mgr) => {
+      const hostId = (mgr as { id?: string }).id;
+      if (hostId === 'host-2') host2Executed = true;
+      return { stdout: 'ok', stderr: '', exitCode: 0, durationMs: 5 };
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'df -h /',
+      description: 'disk check',
+    })) as {
+      byHost: Record<string, { ok: boolean; stderr: string }>;
+      successCount: number;
+      failedCount: number;
+    };
+
+    expect(host2Executed).toBe(false); // H1: host-2 was NOT executed
+    expect(result.byHost['web-2'].ok).toBe(false);
+    expect(result.byHost['web-2'].stderr).toMatch(/blocked/i);
+    expect(result.byHost['web-1'].ok).toBe(true);
+    expect(result.failedCount).toBe(1);
+    expect(result.successCount).toBe(1);
+  });
+
+  it('V3-08 M2: unknown host names in hosts[] are surfaced as skippedHosts', async () => {
+    const { tools } = makeMultiHostTools();
+    mocks.execCommand.mockResolvedValue({
+      stdout: 'ok',
+      stderr: '',
+      exitCode: 0,
+      durationMs: 5,
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'hostname',
+      hosts: ['web-1', 'typo-host'],
+      description: 'check hosts',
+    })) as { skippedHosts: string[]; totalCount: number };
+
+    expect(result.totalCount).toBe(1); // only web-1 ran
+    expect(result.skippedHosts).toContain('typo-host');
+  });
+
+  it('V3-08 L1: duplicate host names are deduped (run once, not twice)', async () => {
+    const { tools } = makeMultiHostTools();
+    mocks.execCommand.mockResolvedValue({
+      stdout: 'ok',
+      stderr: '',
+      exitCode: 0,
+      durationMs: 5,
+    });
+
+    const result = (await callTool(tools, 'exec_multi', {
+      command: 'hostname',
+      hosts: ['web-1', 'web-1'],
+      description: 'dedupe check',
+    })) as { totalCount: number };
+
+    expect(mocks.execCommand).toHaveBeenCalledTimes(1); // deduped, not 2
+    expect(result.totalCount).toBe(1);
   });
 });
 

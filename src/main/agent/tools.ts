@@ -40,6 +40,7 @@ import {
 } from './hooks/engine.js';
 import { createConcurrencyGuard, type ReleaseFunction } from './concurrency.js';
 import { shouldPersist, persistToolResult, readPersistedResult } from './tool-results.js';
+import { aggregateMultiHostResults, type MultiHostExecResult } from './multi-host.js';
 import {
   registerRunningCommand,
   unregisterRunningCommand,
@@ -694,6 +695,302 @@ export function createTools(deps: ToolFactoryDeps) {
         } finally {
           release();
         }
+      },
+    }),
+
+    exec_multi: tool({
+      description:
+        'Execute a READ-only shell command on MULTIPLE hosts in parallel and ' +
+        'return an aggregated comparison. Use for cross-host checks like ' +
+        '"df -h on all web servers" or "systemctl status nginx on every node". ' +
+        'WRITE/SUDO commands are rejected - use exec per-host for those. ' +
+        'The summary flags divergent outputs so you can spot hosts that differ.',
+      parameters: z.object({
+        command: z.string().describe('READ-only shell command to run on every target host'),
+        hosts: z
+          .array(z.string())
+          .optional()
+          .describe('Target host names. If omitted, runs on ALL hosts selected for the session.'),
+        description: z
+          .string()
+          .describe('Purpose of this command - explain WHY you are running it on multiple hosts'),
+      }),
+      execute: async ({ command, hosts: hostNames, description }) => {
+        const toolCallId = `exec_multi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const sanitized = sanitizeCommand(command);
+
+        // Resolve the target set: explicit hostNames, else all session hosts.
+        // Dedupe by host id (L1 fix) so `hosts: ['web-1','web-1']` doesn't run
+        // twice on the same host (which would collide perHostIds + byHost keys).
+        const sessionHosts = context.hostIds
+          .map((id) => hostsStore.get(id))
+          .filter((h): h is NonNullable<typeof h> => h !== null);
+        const requestedTargets =
+          hostNames && hostNames.length > 0
+            ? hostNames.map((n) => {
+                try {
+                  return resolveHost(n).host;
+                } catch {
+                  return null;
+                }
+              })
+            : sessionHosts;
+        // Track unknown host names (M2 fix) so the model sees what was skipped.
+        const unknownHostNames =
+          hostNames && hostNames.length > 0
+            ? hostNames.filter((n) => {
+                try {
+                  resolveHost(n);
+                  return false;
+                } catch {
+                  return true;
+                }
+              })
+            : [];
+        // Dedupe by id, preserving first-seen order.
+        const seenIds = new Set<string>();
+        const targets = requestedTargets.filter((h): h is NonNullable<typeof h> => {
+          if (h === null || seenIds.has(h.id)) return false;
+          seenIds.add(h.id);
+          return true;
+        });
+
+        if (targets.length === 0) {
+          return {
+            error: 'No valid target hosts for exec_multi.',
+            skippedHosts: unknownHostNames,
+          };
+        }
+
+        // Global pre-check against the first host: reject WRITE/SUDO upfront so
+        // we never start a fan-out for a non-READ command. (exec_multi is
+        // READ-only in this first cut - per-host WRITE authorization across a
+        // fan-out is deferred.) Per-host blocked rules are re-checked inside the
+        // fan-out (H1 fix) so a host-specific block on a non-first target is
+        // honored, not silently bypassed.
+        const globalSec = checkCommandSecurity(sanitized, targets[0].id, securityConfig);
+        if (globalSec.commandType !== 'READ' && globalSec.allowed) {
+          return {
+            error:
+              `exec_multi only supports READ commands (classified as ${globalSec.commandType}). ` +
+              'Use exec on each host individually for WRITE/SUDO operations.',
+            blocked: true,
+            skippedHosts: unknownHostNames,
+          };
+        }
+
+        // Emit the aggregate tool-call card up front (M3 fix: a fully-blocked
+        // command below still produces a card so the UI is consistent with exec).
+        onToolCall({
+          toolCallId,
+          toolName: 'exec_multi',
+          hostId: targets.length === 1 ? targets[0].id : undefined,
+          hostName: targets.length === 1 ? targets[0].name : `${targets.length} hosts`,
+          command: sanitized,
+          description,
+          commandType: 'READ',
+          needsApproval: false,
+        });
+
+        // If the global pre-check blocked it (same command blocked everywhere
+        // via global rules), record per-host blocked audits + a blocked card.
+        if (!globalSec.allowed) {
+          for (const h of targets) {
+            recordAudit({
+              sessionId: context.sessionId,
+              hostId: h.id,
+              hostName: h.name,
+              hostIp: h.host,
+              toolName: 'exec_multi',
+              command: sanitized,
+              description,
+              commandType: 'BLOCKED',
+              authorization: 'blocked',
+              exitCode: -1,
+              blockedReason: globalSec.reason,
+            });
+          }
+          onToolResult({
+            toolCallId,
+            toolName: 'exec_multi',
+            success: false,
+            blockedReason: globalSec.reason,
+            authorization: 'blocked',
+          });
+          return {
+            error: globalSec.reason,
+            blocked: true,
+            skippedHosts: unknownHostNames,
+          };
+        }
+
+        // Fan out: run the command on every target host in parallel. Each host
+        // acquires its own read-semaphore slot (concurrency.ts caps parallelism)
+        // and gets a per-host toolCallId so the UI shows distinct cards. A host
+        // failure (SSH down, timeout) does NOT abort the others - allSettled.
+        const settled = await Promise.allSettled(
+          targets.map(async (h): Promise<MultiHostExecResult> => {
+            const perHostId = `${toolCallId}__${h.name}`;
+            // H1 fix: re-check security PER HOST. The global pre-check used
+            // targets[0]; a host-specific blocked rule on this host must be
+            // honored here, not silently bypassed. A blocked host returns a
+            // failed result (does not execute) but does not abort the others.
+            const hostSec = checkCommandSecurity(sanitized, h.id, securityConfig);
+            if (!hostSec.allowed) {
+              onToolResult({
+                toolCallId: perHostId,
+                toolName: 'exec_multi',
+                success: false,
+                blockedReason: hostSec.reason,
+                authorization: 'blocked',
+              });
+              recordAudit({
+                sessionId: context.sessionId,
+                hostId: h.id,
+                hostName: h.name,
+                hostIp: h.host,
+                toolName: 'exec_multi',
+                command: sanitized,
+                description,
+                commandType: 'BLOCKED',
+                authorization: 'blocked',
+                exitCode: -1,
+                blockedReason: hostSec.reason,
+              });
+              return {
+                hostName: h.name,
+                ok: false,
+                exitCode: null,
+                stdout: '',
+                stderr: `blocked: ${hostSec.reason}`,
+                durationMs: 0,
+              };
+            }
+            const release = await guard.acquireRead();
+            try {
+              const manager = await connectionPool.get(h.id);
+              const result = await execCommand(manager, sanitized, (chunk) => {
+                onToolResult({
+                  toolCallId: perHostId,
+                  toolName: 'exec_multi',
+                  success: true,
+                  stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
+                  stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
+                  authorization: 'auto',
+                  partial: true,
+                });
+              });
+              const success = result.exitCode === 0;
+              onToolResult({
+                toolCallId: perHostId,
+                toolName: 'exec_multi',
+                success,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                exitCode: result.exitCode,
+                durationMs: result.durationMs,
+                authorization: 'auto',
+              });
+              recordAudit({
+                sessionId: context.sessionId,
+                hostId: h.id,
+                hostName: h.name,
+                hostIp: h.host,
+                toolName: 'exec_multi',
+                command: sanitized,
+                description,
+                commandType: 'READ',
+                authorization: 'auto',
+                exitCode: result.exitCode ?? undefined,
+                durationMs: result.durationMs,
+                outputSummary: truncateOutput(result.stdout || result.stderr),
+              });
+              return {
+                hostName: h.name,
+                ok: success,
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                durationMs: result.durationMs,
+              };
+            } catch (err) {
+              const errMsg = formatSshError(err as Error, h.name);
+              if (isConnectionError(err as Error)) {
+                connectionPool.invalidate(h.id);
+              }
+              onToolResult({
+                toolCallId: `${toolCallId}__${h.name}`,
+                toolName: 'exec_multi',
+                success: false,
+                stderr: errMsg,
+                authorization: 'auto',
+              });
+              recordAudit({
+                sessionId: context.sessionId,
+                hostId: h.id,
+                hostName: h.name,
+                hostIp: h.host,
+                toolName: 'exec_multi',
+                command: sanitized,
+                description,
+                commandType: 'READ',
+                authorization: 'auto',
+                exitCode: -1,
+                blockedReason: errMsg,
+              });
+              return {
+                hostName: h.name,
+                ok: false,
+                exitCode: null,
+                stdout: '',
+                stderr: errMsg,
+                durationMs: 0,
+              };
+            } finally {
+              release();
+            }
+          }),
+        );
+
+        // allSettled never rejects; map to MultiHostExecResult (rejected -> fail).
+        const results = settled.map((s, i) =>
+          s.status === 'fulfilled'
+            ? s.value
+            : {
+                hostName: targets[i].name,
+                ok: false,
+                exitCode: null,
+                stdout: '',
+                stderr: (s.reason as Error)?.message ?? 'rejected',
+                durationMs: 0,
+              },
+        );
+
+        const summary = aggregateMultiHostResults(results);
+        // Emit a final aggregate card so the user sees the cross-host summary.
+        onToolResult({
+          toolCallId,
+          toolName: 'exec_multi',
+          success: summary.failedCount === 0,
+          stdout: summary.summaryText,
+          stderr: '',
+          exitCode: summary.failedCount === 0 ? 0 : 1,
+          authorization: 'auto',
+        });
+
+        return {
+          summary: summary.summaryText,
+          successCount: summary.successCount,
+          failedCount: summary.failedCount,
+          totalCount: summary.totalCount,
+          divergent: summary.divergent,
+          distinctOutputCount: summary.distinctOutputCount,
+          byHost: summary.byHost,
+          // M2 fix: surface host names that were requested but unresolvable
+          // (not selected for the session / typo), so the model doesn't think
+          // it ran on hosts that were silently dropped.
+          skippedHosts: unknownHostNames,
+        };
       },
     }),
 
