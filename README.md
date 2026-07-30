@@ -54,7 +54,8 @@ npm run dist:win   # 打包 -> dist/OpsAgent-{version}-x64-setup.exe
 
 ## Windows 安装包
 
-- **文件**：`OpsAgent-{version}-x64-setup.exe`（NSIS · Windows x64 · 当前 0.1.0 · 约 89 MB），由 `npm run dist:win` 生成于 `dist/`
+- **下载**：[GitHub Releases](https://github.com/Yong5520/ops-agent/releases/latest) · 直链 [OpsAgent-0.1.0-x64-setup.exe](https://github.com/Yong5520/ops-agent/releases/download/v0.1.0/OpsAgent-0.1.0-x64-setup.exe)（约 89 MB）
+- **文件**：`OpsAgent-{version}-x64-setup.exe`（NSIS · Windows x64 · 当前 0.1.0），也可由 `npm run dist:win` 本地生成于 `dist/`
 - **安装**：双击运行 → 选择安装目录（可更改，按用户安装无需管理员）→ 自动创建桌面快捷方式 + 开始菜单「OpsAgent」
 - **语言**：中文 / 英文
 - **卸载**：系统「设置 - 应用」或安装目录下的卸载程序
