@@ -425,6 +425,14 @@ function HostForm({
   // V3-09: SSH bastion / agent forwarding / host-key fields.
   const [jumpHostId, setJumpHostId] = useState(editing?.jumpHostId ?? '');
   const [agentForward, setAgentForward] = useState(editing?.agentForward ?? false);
+  // V3-09.1: encoded-bastion mode.
+  const [jumpMode, setJumpMode] = useState<'forward' | 'encoded'>(editing?.jumpMode ?? 'forward');
+  const [jumpUsernameTemplate, setJumpUsernameTemplate] = useState(
+    editing?.jumpUsernameTemplate ?? '',
+  );
+  const [jumpTargetAuth, setJumpTargetAuth] = useState<'bastion-managed' | 'password'>(
+    editing?.jumpTargetAuth ?? 'bastion-managed',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -449,6 +457,11 @@ function HostForm({
         jumpHostId: jumpHostId || undefined,
         agentForward,
         hostKeyFingerprint: editing?.hostKeyFingerprint,
+        // V3-09.1: only carry jumpMode/template/targetAuth when a jump host is
+        // actually selected - otherwise the host is direct-connect.
+        jumpMode: jumpHostId ? jumpMode : 'forward',
+        jumpUsernameTemplate: jumpUsernameTemplate.trim() || undefined,
+        jumpTargetAuth: jumpHostId ? jumpTargetAuth : 'bastion-managed',
       };
       await onSave(input);
     } catch (err) {
@@ -590,6 +603,57 @@ function HostForm({
               ))}
           </Select>
         </Field>
+        {jumpHostId && (
+          <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 space-y-3">
+            <div className="text-xs font-medium text-zinc-400">跳转模式（如何经堡垒机连接）</div>
+            <Field label="跳转模式">
+              <Select
+                value={jumpMode}
+                onChange={(e) => setJumpMode(e.target.value as 'forward' | 'encoded')}
+              >
+                <option value="forward">TCP 转发（forward，堡垒机允许端口转发时用）</option>
+                <option value="encoded">用户名编码（encoded，堡垒机禁用端口转发时用）</option>
+              </Select>
+            </Field>
+            {jumpMode === 'encoded' && (
+              <>
+                <div className="text-xs text-zinc-500">
+                  用户名编码模式：单次连接到堡垒机，用户名编码为目标信息 （如{' '}
+                  <code className="font-mono">堡垒机用户@目标用户@目标IP</code>
+                  ），堡垒机自行登录目标。 凭据使用<strong>堡垒机主机记录</strong>
+                  里配的密码/密钥（本机路径）， 此处的目标密码仅在"手动密码"时用于二次认证。
+                </div>
+                <Field label="用户名编码模板（可选，留空用默认 {bastionUser}@{targetUser}@{targetHost}）">
+                  <Input
+                    value={jumpUsernameTemplate}
+                    onChange={(e) => setJumpUsernameTemplate(e.target.value)}
+                    placeholder="{bastionUser}@{targetUser}@{targetHost}"
+                  />
+                </Field>
+                <Field label="目标认证方式">
+                  <Select
+                    value={jumpTargetAuth}
+                    onChange={(e) =>
+                      setJumpTargetAuth(e.target.value as 'bastion-managed' | 'password')
+                    }
+                  >
+                    <option value="bastion-managed">
+                      堡垒机托管（堡垒机用自己存的凭据登录目标）
+                    </option>
+                    <option value="password">手动密码（用上面的目标密码做二次键盘交互认证）</option>
+                  </Select>
+                </Field>
+              </>
+            )}
+            {jumpMode === 'forward' && (
+              <div className="text-xs text-zinc-500">
+                TCP 转发模式：先连堡垒机，再经其端口转发隧道连目标。 凭据使用
+                <strong>目标主机</strong>的密码/密钥（本机路径）。 若堡垒机报"port forwarding is
+                disabled"，请改用用户名编码模式。
+              </div>
+            )}
+          </div>
+        )}
         <label className="flex items-center gap-2 text-sm text-zinc-300">
           <input
             type="checkbox"

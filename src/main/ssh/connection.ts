@@ -66,6 +66,15 @@ export function buildConnectConfig(
   // V3-09: agent forwarding.
   if (config.agentForward) connectConfig.agentForward = true;
 
+  // V3-09.1: encoded-bastion manual target auth. When targetPassword is set,
+  // the bastion prompts a second keyboard-interactive round for the target's
+  // password. Enable tryKeyboard so ssh2 raises 'keyboard-interactive' events;
+  // connect() wires the handler that answers round 1 with the bastion password
+  // (config.password) and subsequent rounds with the target password.
+  if (config.targetPassword) {
+    connectConfig.tryKeyboard = true;
+  }
+
   // V3-09: host-key verification. ssh2 calls hostVerifier(key, verify) during
   // kex; verify(true) accepts, verify(false) rejects (fails the connection).
   if (config.hostKeyFingerprint) {
@@ -230,6 +239,39 @@ export class SSHConnectionManager extends EventEmitter {
         logger.error(`[${this.hostName}] SSH error: ${err.message}`);
         reject(new OpsAgentError(`[${this.hostName}] SSH error: ${err.message}`, 'SSH_ERROR'));
       });
+
+      // V3-09.1: encoded-bastion manual target auth. The bastion issues a
+      // keyboard-interactive challenge: if the bastion uses password auth, round
+      // 1 = bastion password and round 2+ = target password. If the bastion uses
+      // key auth (no config.password), ssh2 skips the bastion keyboard round, so
+      // round 1 = the target's prompt -> answer with the target password. Best-
+      // effort: prompt/round detection is bastion-specific; if the bastion only
+      // does one round, the unused password is simply not sent.
+      if (this.config.targetPassword) {
+        const bastionPassword = this.config.password;
+        const targetPassword = this.config.targetPassword;
+        const bastionUsesPassword = !!bastionPassword;
+        let kbdRound = 0;
+        this.conn!.on(
+          'keyboard-interactive',
+          (
+            _name: string,
+            _instructions: string,
+            _lang: string,
+            prompts: Array<{ prompt: string }>,
+            finish: (answers: string[]) => void,
+          ) => {
+            kbdRound += 1;
+            const answers = prompts.map(() => {
+              // Bastion-password round only exists when the bastion uses
+              // password auth; otherwise the first round IS the target.
+              const isBastionRound = bastionUsesPassword && kbdRound === 1;
+              return isBastionRound ? (bastionPassword ?? '') : (targetPassword ?? '');
+            });
+            finish(answers);
+          },
+        );
+      }
 
       this.conn!.on('end', () => {
         this.conn = null;

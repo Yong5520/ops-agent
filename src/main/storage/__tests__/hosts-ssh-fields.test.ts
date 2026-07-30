@@ -248,4 +248,75 @@ describe('V3-09 hosts SSH fields', () => {
       expect(upd!.args).toBe('SHA256:captured');
     });
   });
+
+  // ── V3-09.1: encoded-bastion columns ──────────────────────────────────
+  describe('V3-09.1 encoded-bastion fields', () => {
+    beforeEach(() => {
+      state.nextRow = {
+        id: 'h1',
+        name: 'web-1',
+        host: '10.0.0.1',
+        port: 22,
+        username: 'root',
+        auth_type: 'password',
+        password: null,
+        key_path: null,
+        sudo_password: null,
+        su_password: null,
+        group_name: 'default',
+        timeout_ms: 60000,
+        jump_host_id: null,
+        agent_forward: 0,
+        host_key_fingerprint: null,
+        jump_mode: 'forward',
+        jump_username_template: null,
+        jump_target_auth: 'bastion-managed',
+        created_at: '2026-01-01',
+        updated_at: '2026-01-01',
+      };
+    });
+
+    it('create binds jump_mode / jump_username_template / jump_target_auth', () => {
+      hostsStore.create(
+        baseInput({
+          jumpMode: 'encoded',
+          jumpUsernameTemplate: '{targetUser}@{targetHost}',
+          jumpTargetAuth: 'password',
+        }),
+      );
+      const insert = state.stmts.find((s) => s.sql.includes('INSERT INTO hosts'));
+      expect(insert!.sql).toContain('jump_mode');
+      expect(insert!.sql).toContain('jump_username_template');
+      expect(insert!.sql).toContain('jump_target_auth');
+      expect(insert!.args).toMatchObject({
+        jumpMode: 'encoded',
+        jumpUsernameTemplate: '{targetUser}@{targetHost}',
+        jumpTargetAuth: 'password',
+      });
+    });
+
+    it('create defaults jump_mode=forward and jump_target_auth=bastion-managed', () => {
+      hostsStore.create(baseInput());
+      const insert = state.stmts.find((s) => s.sql.includes('INSERT INTO hosts'));
+      expect(insert!.args).toMatchObject({
+        jumpMode: 'forward',
+        jumpTargetAuth: 'bastion-managed',
+      });
+    });
+
+    it('update sets the encoded-bastion columns', () => {
+      hostsStore.update('h1', { jumpMode: 'encoded', jumpTargetAuth: 'password' });
+      const upd = state.stmts.find((s) => s.sql.includes('UPDATE hosts'));
+      expect(upd!.sql).toContain('jump_mode');
+      expect(upd!.sql).toContain('jump_target_auth');
+      expect(upd!.args).toMatchObject({ jumpMode: 'encoded', jumpTargetAuth: 'password' });
+    });
+
+    it('rowToConfig maps jump_mode / jump_target_auth with defaults', () => {
+      const host = hostsStore.get('h1');
+      expect(host?.jumpMode).toBe('forward');
+      expect(host?.jumpTargetAuth).toBe('bastion-managed');
+      expect(host?.jumpUsernameTemplate).toBeUndefined();
+    });
+  });
 });

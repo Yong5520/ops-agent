@@ -22,6 +22,11 @@ export interface SshClientConfig {
   /** When set, connection.ts awaits this to obtain a stream from the jump host
    * and passes it as `sock` to ssh2.Client.connect() (cascaded connection). */
   getJumpStream?: () => Promise<unknown>;
+  // V3-09.1: encoded-username bastion. When jumpTargetAuth='password', this is
+  // the target's password, used to answer the bastion's second keyboard-
+  // interactive round (the target's password prompt). Undefined for
+  // 'bastion-managed' (the bastion logs into the target with its own creds).
+  targetPassword?: string;
 }
 
 // Connection state machine values.

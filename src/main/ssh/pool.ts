@@ -103,24 +103,34 @@ export class ConnectionPool extends EventEmitter {
       hostKeyFingerprint: host.hostKeyFingerprint,
     });
 
+    // V3-09.1/M2: in encoded mode the SSH connection terminates at the BASTION,
+    // so host-key verification + TOFU capture target the bastion's record (the
+    // target's fingerprint is irrelevant - the client never speaks SSH to the
+    // target). In direct/forward mode, verification targets the host itself.
+    const keyVerificationHost =
+      host.jumpMode === 'encoded' && host.jumpHostId ? hostsStore.get(host.jumpHostId) : host;
+
     mgr = new SSHConnectionManager(host.id, host.name, config);
     mgr.on('stateChange', (event: ConnectionEvent) => {
       this.emit('stateChange', event);
     });
 
-    // V3-09: TOFU host-key capture. When the host has no recorded fingerprint,
-    // the connection's hostVerifier captures the server's real fingerprint and
-    // hands it here. Persist via setHostKeyFingerprint (NOT update() - update()
-    // merges via get() which strips secrets, and would null the password).
-    // Guarded so a persistence failure never breaks the connection.
-    if (!host.hostKeyFingerprint) {
+    // V3-09: TOFU host-key capture. When the verification target host has no
+    // recorded fingerprint, the connection's hostVerifier captures the server's
+    // real fingerprint and hands it here. Persist via setHostKeyFingerprint
+    // (NOT update() - update() merges via get() which strips secrets, and would
+    // null the password). In encoded mode this captures the BASTION's key under
+    // the bastion's record (keyVerificationHost). Guarded so a persistence
+    // failure never breaks the connection.
+    if (keyVerificationHost && !keyVerificationHost.hostKeyFingerprint) {
+      const kvHost = keyVerificationHost;
       mgr.onHostKey = (fingerprint: string) => {
         try {
-          hostsStore.setHostKeyFingerprint(host.id, fingerprint);
-          logger.info(`[Pool] Recorded host-key fingerprint for ${host.name}: ${fingerprint}`);
+          hostsStore.setHostKeyFingerprint(kvHost.id, fingerprint);
+          logger.info(`[Pool] Recorded host-key fingerprint for ${kvHost.name}: ${fingerprint}`);
         } catch (err) {
           logger.warn(
-            `[Pool] Failed to persist host-key fingerprint for ${host.name}: ${(err as Error).message}`,
+            `[Pool] Failed to persist host-key fingerprint for ${kvHost.name}: ${(err as Error).message}`,
           );
         }
       };
@@ -175,13 +185,39 @@ export class ConnectionPool extends EventEmitter {
   }
 
   // Build an SshClientConfig from a decrypted HostConfig. Delegates to the pure
-  // buildSshConfig (testable) and injects the jump-host stream provider when
-  // the host uses a bastion. `visited` is threaded through for cycle detection
-  // (A->B->A) across the recursive jump chain - each hop adds its jumpHostId.
+  // buildSshConfig (testable). Two jump modes:
+  //  - 'encoded' (V3-09.1): resolve the bastion host record and pass it in;
+  //    buildSshConfig connects straight to the bastion with an encoded username
+  //    (no forwardOut). Used for bastions that disable TCP forwarding.
+  //  - 'forward' (default, V3-09): inject getJumpStream (openJumpStream +
+  //    forwardOut) with cycle detection via `visited`.
   private buildSshConfig(host: HostConfig, visited: Set<string>): SshClientConfig {
+    if (host.jumpMode === 'encoded' && host.jumpHostId) {
+      // Resolve the bastion WITH secrets (need its password/key to authenticate
+      // the single connection to the bastion). The bastion is connected to
+      // directly; no recursion / no forwardOut.
+      const bastion = hostsStore.getWithSecrets(host.jumpHostId);
+      if (!bastion) {
+        throw new OpsAgentError(
+          `Host "${host.name}" uses encoded jump mode but its bastion ` +
+            `(jumpHostId=${host.jumpHostId}) was not found. It may have been deleted.`,
+          'SSH_ERROR',
+        );
+      }
+      logger.info(
+        `[Pool] Connecting to ${host.name} via encoded bastion ${bastion.name} ` +
+          `(${bastion.host}:${bastion.port})`,
+      );
+      return buildSshConfigPure(host, { bastion });
+    }
     const getJumpStream = host.jumpHostId
       ? () => this.openJumpStream(host, host.jumpHostId!, visited)
       : undefined;
+    if (host.jumpHostId) {
+      logger.info(`[Pool] Connecting to ${host.name} via forward bastion (forwardOut)`);
+    } else {
+      logger.info(`[Pool] Connecting to ${host.name} (direct)`);
+    }
     return buildSshConfigPure(host, { getJumpStream });
   }
 

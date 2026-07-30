@@ -26,6 +26,15 @@ export interface HostConfig {
   jumpHostId?: string; // FK to another host used as a jump/bastion
   agentForward: boolean; // enable OpenSSH agent forwarding
   hostKeyFingerprint?: string; // expected SHA256 fingerprint (TOFU)
+  // V3-09.1: encoded-username bastion mode (for bastions that disable TCP
+  // forwarding and route via an encoded username like
+  // `{bastionUser}@{targetUser}@{targetHost}`). 'forward' (default) = the
+  // V3-09 forwardOut/ProxyJump path; 'encoded' = single connection to the
+  // bastion with the encoded username, exec runs on the target via bastion
+  // routing.
+  jumpMode?: 'forward' | 'encoded';
+  jumpUsernameTemplate?: string; // default {bastionUser}@{targetUser}@{targetHost}
+  jumpTargetAuth?: 'bastion-managed' | 'password'; // default bastion-managed
   createdAt: string;
   updatedAt: string;
 }

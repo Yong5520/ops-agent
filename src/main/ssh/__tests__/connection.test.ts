@@ -70,7 +70,8 @@ describe('buildConnectConfig', () => {
   it('V3-09: hostVerifier accepts when the key fingerprint matches', () => {
     // Compute the real fingerprint of a known key so the match path is exercised.
     const keyBytes = Buffer.from('my-host-key');
-    const expected = 'SHA256:' + createHash('sha256').update(keyBytes).digest('base64').replace(/=+$/, '');
+    const expected =
+      'SHA256:' + createHash('sha256').update(keyBytes).digest('base64').replace(/=+$/, '');
     const cfg = buildConnectConfig(makeConfig({ hostKeyFingerprint: expected }));
     const hostVerifier = cfg.hostVerifier as (
       key: Buffer | string,
@@ -91,7 +92,8 @@ describe('buildConnectConfig', () => {
     // the verifier must trust-on-first-use - compute the key's fingerprint,
     // hand it to onHostKey (so the pool can persist it), and verify(true).
     const keyBytes = Buffer.from('my-host-key');
-    const expected = 'SHA256:' + createHash('sha256').update(keyBytes).digest('base64').replace(/=+$/, '');
+    const expected =
+      'SHA256:' + createHash('sha256').update(keyBytes).digest('base64').replace(/=+$/, '');
     const onHostKey = vi.fn();
     const cfg = buildConnectConfig(makeConfig(), { onHostKey });
     expect(typeof cfg.hostVerifier).toBe('function');
@@ -103,5 +105,15 @@ describe('buildConnectConfig', () => {
     hostVerifier(keyBytes, verify);
     expect(verify).toHaveBeenCalledWith(true); // TOFU accepts
     expect(onHostKey).toHaveBeenCalledWith(expected); // captured for persistence
+  });
+
+  it('V3-09.1: enables tryKeyboard when targetPassword is set (manual target auth)', () => {
+    const cfg = buildConnectConfig(makeConfig({ targetPassword: 'target-pw' }));
+    expect(cfg.tryKeyboard).toBe(true);
+  });
+
+  it('V3-09.1: omits tryKeyboard when no targetPassword (bastion-managed)', () => {
+    const cfg = buildConnectConfig(makeConfig());
+    expect(cfg.tryKeyboard).toBeUndefined();
   });
 });

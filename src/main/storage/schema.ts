@@ -24,6 +24,15 @@ CREATE TABLE IF NOT EXISTS hosts (
   jump_host_id          TEXT,
   agent_forward         INTEGER NOT NULL DEFAULT 0,
   host_key_fingerprint  TEXT,
+  -- V3-09.1: encoded-username bastion mode (for bastions that disable TCP
+  -- forwarding and route via an encoded username). jump_mode 'forward' (default)
+  -- = ProxyJump/forwardOut path; 'encoded' = single connection to the bastion
+  -- with an encoded username. jump_target_auth 'bastion-managed' (default) =
+  -- bastion logs into the target with its own creds; 'password' = client
+  -- supplies the target password for a 2nd keyboard-interactive round.
+  jump_mode               TEXT NOT NULL DEFAULT 'forward',
+  jump_username_template  TEXT,
+  jump_target_auth        TEXT NOT NULL DEFAULT 'bastion-managed',
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -41,7 +41,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 13;
+  const targetVersion = 14;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -251,6 +251,21 @@ function runMigrations(database: DB): void {
     addColumnIfNotExists(database, 'hosts', 'jump_host_id', 'TEXT');
     addColumnIfNotExists(database, 'hosts', 'agent_forward', 'INTEGER NOT NULL DEFAULT 0');
     addColumnIfNotExists(database, 'hosts', 'host_key_fingerprint', 'TEXT');
+  }
+
+  if (currentVersion < 14) {
+    // V3-09.1: encoded-username bastion mode. Three additive columns on hosts.
+    // Defaults preserve existing behavior (jump_mode='forward' = the V3-09
+    // forwardOut path; jump_target_auth='bastion-managed'). Idempotent.
+    logger.info(`Running migration v14: hosts encoded-bastion columns`);
+    addColumnIfNotExists(database, 'hosts', 'jump_mode', "TEXT NOT NULL DEFAULT 'forward'");
+    addColumnIfNotExists(database, 'hosts', 'jump_username_template', 'TEXT');
+    addColumnIfNotExists(
+      database,
+      'hosts',
+      'jump_target_auth',
+      "TEXT NOT NULL DEFAULT 'bastion-managed'",
+    );
   }
 
   setUserVersion(database, targetVersion);

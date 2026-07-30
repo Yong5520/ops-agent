@@ -8,7 +8,7 @@
 // the recursive jump connection). Pure function (the key file read is stubbed
 // via a passed-in reader) so it unit-tests directly.
 import { describe, it, expect, vi } from 'vitest';
-import { buildSshConfig } from '../build-ssh-config.js';
+import { buildSshConfig, renderJumpUsername } from '../build-ssh-config.js';
 import type { HostConfig } from '../../../shared/types.js';
 
 function makeHost(overrides: Partial<HostConfig> = {}): HostConfig {
@@ -91,5 +91,162 @@ describe('buildSshConfig', () => {
   it('V3-09: omits getJumpStream when no jumpHostId', () => {
     const cfg = buildSshConfig(makeHost());
     expect(cfg.getJumpStream).toBeUndefined();
+  });
+});
+
+// ── V3-09.1: encoded-username bastion mode ──────────────────────────────
+// Some bastions (e.g. jump.iluvatar.com:2222) disable TCP forwarding and
+// instead route via an encoded username: a single SSH connection to the
+// bastion with username `{bastionUser}@{targetUser}@{targetHost}` drops the
+// caller into a shell on the target. No forwardOut, no second SSH hop from
+// the client. buildSshConfig in encoded mode connects straight to the bastion
+// using the bastion's credentials.
+describe('renderJumpUsername', () => {
+  const bastion: HostConfig = {
+    id: 'b1',
+    name: 'bastion',
+    host: 'jump.iluvatar.com',
+    port: 2222,
+    username: 'yong.cao',
+    authType: 'password',
+    password: 'bpw',
+    groupName: 'default',
+    timeoutMs: 60000,
+    agentForward: false,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-01-01',
+  };
+  const target: HostConfig = {
+    id: 't1',
+    name: 'chip-18-10',
+    host: '10.150.18.10',
+    port: 22,
+    username: 'powerone',
+    authType: 'password',
+    groupName: 'default',
+    timeoutMs: 60000,
+    agentForward: false,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-01-01',
+  };
+
+  it('renders the default template {bastionUser}@{targetUser}@{targetHost}', () => {
+    expect(renderJumpUsername(undefined, bastion, target)).toBe('yong.cao@powerone@10.150.18.10');
+  });
+
+  it('renders a custom template with all placeholders', () => {
+    expect(
+      renderJumpUsername('{bastionUser}/{targetUser}/{targetHost}:{targetPort}', bastion, target),
+    ).toBe('yong.cao/powerone/10.150.18.10:22');
+  });
+
+  it('throws on an unknown placeholder', () => {
+    expect(() => renderJumpUsername('{bastionUser}@{unknown}', bastion, target)).toThrow(
+      /unknown placeholder/i,
+    );
+  });
+});
+
+describe('buildSshConfig encoded mode', () => {
+  const bastion: HostConfig = {
+    id: 'b1',
+    name: 'bastion',
+    host: 'jump.iluvatar.com',
+    port: 2222,
+    username: 'yong.cao',
+    authType: 'password',
+    password: 'bpw',
+    groupName: 'default',
+    timeoutMs: 60000,
+    agentForward: false,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-01-01',
+  };
+  const target = (overrides: Partial<HostConfig> = {}): HostConfig => ({
+    id: 't1',
+    name: 'chip-18-10',
+    host: '10.150.18.10',
+    port: 22,
+    username: 'powerone',
+    authType: 'password',
+    password: 'target-pw',
+    groupName: 'default',
+    timeoutMs: 60000,
+    agentForward: false,
+    jumpHostId: 'b1',
+    jumpMode: 'encoded',
+    createdAt: '2026-01-01',
+    updatedAt: '2026-01-01',
+    ...overrides,
+  });
+
+  it('connects to the BASTION (not the target) with the encoded username', () => {
+    const cfg = buildSshConfig(target(), { bastion });
+    expect(cfg.host).toBe('jump.iluvatar.com'); // bastion host, not 10.150.18.10
+    expect(cfg.port).toBe(2222); // bastion port, not 22
+    expect(cfg.username).toBe('yong.cao@powerone@10.150.18.10'); // encoded
+  });
+
+  it('uses the BASTION credentials (not the target password)', () => {
+    const cfg = buildSshConfig(target(), { bastion });
+    expect(cfg.password).toBe('bpw'); // bastion password
+    expect(cfg.password).not.toBe('target-pw');
+  });
+
+  it('does NOT wire getJumpStream (single connection, no forwardOut)', () => {
+    const getJumpStream = vi.fn();
+    const cfg = buildSshConfig(target(), { bastion, getJumpStream });
+    expect(cfg.getJumpStream).toBeUndefined();
+  });
+
+  it('uses a custom username template when provided', () => {
+    const cfg = buildSshConfig(
+      target({ jumpUsernameTemplate: '{targetUser}@{targetHost}@{bastionUser}' }),
+      { bastion },
+    );
+    expect(cfg.username).toBe('powerone@10.150.18.10@yong.cao');
+  });
+
+  it('passes through targetPassword when jumpTargetAuth is "password"', () => {
+    const cfg = buildSshConfig(target({ jumpTargetAuth: 'password' }), { bastion });
+    // The bastion password still authenticates the connection; targetPassword
+    // is carried for the second keyboard-interactive round (target prompt).
+    expect(cfg.password).toBe('bpw');
+    expect(cfg.targetPassword).toBe('target-pw');
+  });
+
+  it('omits targetPassword when jumpTargetAuth is "bastion-managed" (default)', () => {
+    const cfg = buildSshConfig(target(), { bastion });
+    expect(cfg.targetPassword).toBeUndefined();
+  });
+
+  it('throws when encoded mode is set but no bastion record is provided', () => {
+    expect(() => buildSshConfig(target())).toThrow(/bastion/i);
+  });
+
+  it('throws when the bastion itself has a jumpHostId (encoded mode does not chain)', () => {
+    const chainingBastion: HostConfig = { ...bastion, jumpHostId: 'b2' };
+    expect(() => buildSshConfig(target(), { bastion: chainingBastion })).toThrow(/chain/i);
+  });
+
+  it('V3-09.1 H1: carries the TARGET sudo/su password (exec runs on target), not bastion', () => {
+    const cfg = buildSshConfig(target({ sudoPassword: 'target-sudo', suPassword: 'target-su' }), {
+      bastion: { ...bastion, sudoPassword: 'bastion-sudo', suPassword: 'bastion-su' },
+    });
+    expect(cfg.sudoPassword).toBe('target-sudo');
+    expect(cfg.suPassword).toBe('target-su');
+    expect(cfg.sudoPassword).not.toBe('bastion-sudo');
+  });
+
+  it('V3-09.1 M2: carries the BASTION hostKeyFingerprint (connection terminates at bastion)', () => {
+    const cfg = buildSshConfig(target(), {
+      bastion: { ...bastion, hostKeyFingerprint: 'SHA256:bastion-fp' },
+    });
+    expect(cfg.hostKeyFingerprint).toBe('SHA256:bastion-fp');
+  });
+
+  it('V3-09.1 M2: omits hostKeyFingerprint when the bastion has none (TOFU will capture it)', () => {
+    const cfg = buildSshConfig(target(), { bastion });
+    expect(cfg.hostKeyFingerprint).toBeUndefined();
   });
 });

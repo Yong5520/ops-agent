@@ -18,6 +18,9 @@ interface HostRow {
   jump_host_id: string | null;
   agent_forward: number;
   host_key_fingerprint: string | null;
+  jump_mode: string | null;
+  jump_username_template: string | null;
+  jump_target_auth: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -39,6 +42,12 @@ function rowToConfig(row: HostRow, includeSecrets = false): HostConfig {
     jumpHostId: row.jump_host_id ?? undefined,
     agentForward: row.agent_forward === 1,
     hostKeyFingerprint: row.host_key_fingerprint ?? undefined,
+    // V3-09.1: encoded-bastion fields. DB defaults guarantee non-null for
+    // jump_mode/jump_target_auth, but older rows migrated via addColumnIfNotExists
+    // may carry NULL -> fall back to the documented defaults.
+    jumpMode: (row.jump_mode ?? 'forward') as 'forward' | 'encoded',
+    jumpUsernameTemplate: row.jump_username_template ?? undefined,
+    jumpTargetAuth: (row.jump_target_auth ?? 'bastion-managed') as 'bastion-managed' | 'password',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -72,10 +81,12 @@ export const hostsStore = {
     const stmt = db.prepare(`
       INSERT INTO hosts (name, host, port, username, auth_type, password, key_path,
                          sudo_password, su_password, group_name, timeout_ms,
-                         jump_host_id, agent_forward, host_key_fingerprint)
+                         jump_host_id, agent_forward, host_key_fingerprint,
+                         jump_mode, jump_username_template, jump_target_auth)
       VALUES (@name, @host, @port, @username, @authType, @password, @keyPath,
               @sudoPassword, @suPassword, @groupName, @timeoutMs,
-              @jumpHostId, @agentForward, @hostKeyFingerprint)
+              @jumpHostId, @agentForward, @hostKeyFingerprint,
+              @jumpMode, @jumpUsernameTemplate, @jumpTargetAuth)
       RETURNING *
     `);
     const row = stmt.get({
@@ -93,6 +104,9 @@ export const hostsStore = {
       jumpHostId: payload.jumpHostId ?? null,
       agentForward: payload.agentForward ? 1 : 0,
       hostKeyFingerprint: payload.hostKeyFingerprint ?? null,
+      jumpMode: payload.jumpMode ?? 'forward',
+      jumpUsernameTemplate: payload.jumpUsernameTemplate ?? null,
+      jumpTargetAuth: payload.jumpTargetAuth ?? 'bastion-managed',
     }) as HostRow;
     return rowToConfig(row);
   },
@@ -118,6 +132,9 @@ export const hostsStore = {
       jumpHostId: payload.jumpHostId ?? existing.jumpHostId,
       agentForward: payload.agentForward ?? existing.agentForward,
       hostKeyFingerprint: payload.hostKeyFingerprint ?? existing.hostKeyFingerprint,
+      jumpMode: payload.jumpMode ?? existing.jumpMode ?? 'forward',
+      jumpUsernameTemplate: payload.jumpUsernameTemplate ?? existing.jumpUsernameTemplate,
+      jumpTargetAuth: payload.jumpTargetAuth ?? existing.jumpTargetAuth ?? 'bastion-managed',
     };
     db.prepare(
       `
@@ -128,6 +145,8 @@ export const hostsStore = {
           group_name = @groupName, timeout_ms = @timeoutMs,
           jump_host_id = @jumpHostId, agent_forward = @agentForward,
           host_key_fingerprint = @hostKeyFingerprint,
+          jump_mode = @jumpMode, jump_username_template = @jumpUsernameTemplate,
+          jump_target_auth = @jumpTargetAuth,
           updated_at = datetime('now')
       WHERE id = @id
     `,
@@ -147,6 +166,9 @@ export const hostsStore = {
       jumpHostId: merged.jumpHostId ?? null,
       agentForward: merged.agentForward ? 1 : 0,
       hostKeyFingerprint: merged.hostKeyFingerprint ?? null,
+      jumpMode: merged.jumpMode,
+      jumpUsernameTemplate: merged.jumpUsernameTemplate ?? null,
+      jumpTargetAuth: merged.jumpTargetAuth,
     });
     return this.get(id)!;
   },
