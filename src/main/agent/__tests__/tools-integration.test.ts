@@ -119,6 +119,7 @@ const testHost: HostConfig = {
   authType: 'password' as const,
   groupName: 'default',
   timeoutMs: 30000,
+  agentForward: false,
   createdAt: '2026-01-01',
   updatedAt: '2026-01-01',
 };

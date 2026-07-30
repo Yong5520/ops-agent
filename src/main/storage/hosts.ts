@@ -15,6 +15,9 @@ interface HostRow {
   su_password: string | null;
   group_name: string;
   timeout_ms: number;
+  jump_host_id: string | null;
+  agent_forward: number;
+  host_key_fingerprint: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -33,6 +36,9 @@ function rowToConfig(row: HostRow, includeSecrets = false): HostConfig {
     suPassword: includeSecrets && row.su_password ? decrypt(row.su_password) : undefined,
     groupName: row.group_name,
     timeoutMs: row.timeout_ms,
+    jumpHostId: row.jump_host_id ?? undefined,
+    agentForward: row.agent_forward === 1,
+    hostKeyFingerprint: row.host_key_fingerprint ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -65,9 +71,11 @@ export const hostsStore = {
     const db = getDb();
     const stmt = db.prepare(`
       INSERT INTO hosts (name, host, port, username, auth_type, password, key_path,
-                         sudo_password, su_password, group_name, timeout_ms)
+                         sudo_password, su_password, group_name, timeout_ms,
+                         jump_host_id, agent_forward, host_key_fingerprint)
       VALUES (@name, @host, @port, @username, @authType, @password, @keyPath,
-              @sudoPassword, @suPassword, @groupName, @timeoutMs)
+              @sudoPassword, @suPassword, @groupName, @timeoutMs,
+              @jumpHostId, @agentForward, @hostKeyFingerprint)
       RETURNING *
     `);
     const row = stmt.get({
@@ -82,6 +90,9 @@ export const hostsStore = {
       suPassword: payload.suPassword ? encrypt(payload.suPassword) : null,
       groupName: payload.groupName,
       timeoutMs: payload.timeoutMs,
+      jumpHostId: payload.jumpHostId ?? null,
+      agentForward: payload.agentForward ? 1 : 0,
+      hostKeyFingerprint: payload.hostKeyFingerprint ?? null,
     }) as HostRow;
     return rowToConfig(row);
   },
@@ -104,6 +115,9 @@ export const hostsStore = {
       suPassword: payload.suPassword ?? existing.suPassword,
       groupName: payload.groupName ?? existing.groupName,
       timeoutMs: payload.timeoutMs ?? existing.timeoutMs,
+      jumpHostId: payload.jumpHostId ?? existing.jumpHostId,
+      agentForward: payload.agentForward ?? existing.agentForward,
+      hostKeyFingerprint: payload.hostKeyFingerprint ?? existing.hostKeyFingerprint,
     };
     db.prepare(
       `
@@ -112,6 +126,8 @@ export const hostsStore = {
           auth_type = @authType, password = @password, key_path = @keyPath,
           sudo_password = @sudoPassword, su_password = @suPassword,
           group_name = @groupName, timeout_ms = @timeoutMs,
+          jump_host_id = @jumpHostId, agent_forward = @agentForward,
+          host_key_fingerprint = @hostKeyFingerprint,
           updated_at = datetime('now')
       WHERE id = @id
     `,
@@ -128,8 +144,23 @@ export const hostsStore = {
       suPassword: merged.suPassword ? encrypt(merged.suPassword) : null,
       groupName: merged.groupName,
       timeoutMs: merged.timeoutMs,
+      jumpHostId: merged.jumpHostId ?? null,
+      agentForward: merged.agentForward ? 1 : 0,
+      hostKeyFingerprint: merged.hostKeyFingerprint ?? null,
     });
     return this.get(id)!;
+  },
+
+  // V3-09: persist a captured host-key fingerprint WITHOUT round-tripping
+  // through update(). update() merges via this.get() (no secrets), which would
+  // null out password/sudoPassword/suPassword. This targeted UPDATE touches only
+  // the fingerprint column so credentials survive. Used by the pool's TOFU path.
+  setHostKeyFingerprint(id: string, fingerprint: string): void {
+    getDb()
+      .prepare(
+        `UPDATE hosts SET host_key_fingerprint = ?, updated_at = datetime('now') WHERE id = ?`,
+      )
+      .run(fingerprint, id);
   },
 
   delete(id: string): void {
@@ -143,6 +174,9 @@ export const hostsStore = {
       db.prepare('UPDATE sessions SET host_id = NULL WHERE host_id = ?').run(id);
       db.prepare('UPDATE tool_calls SET host_id = NULL WHERE host_id = ?').run(id);
       db.prepare('UPDATE audit_logs SET host_id = NULL WHERE host_id = ?').run(id);
+      // V3-09: clear bastion references to the deleted host so dependents
+      // don't dangle (would throw "Unknown host id" on their next connect).
+      db.prepare('UPDATE hosts SET jump_host_id = NULL WHERE jump_host_id = ?').run(id);
       db.prepare('DELETE FROM custom_rules WHERE host_id = ?').run(id);
       db.prepare('DELETE FROM hosts WHERE id = ?').run(id);
     });

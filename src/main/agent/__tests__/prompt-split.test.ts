@@ -53,6 +53,7 @@ function makeHost(id: string, name: string): HostConfig {
     authType: 'password' as const,
     groupName: 'default',
     timeoutMs: 120000,
+    agentForward: false,
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
   };

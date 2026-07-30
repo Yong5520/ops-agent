@@ -41,7 +41,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 12;
+  const targetVersion = 13;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -239,6 +239,18 @@ function runMigrations(database: DB): void {
         SELECT DISTINCT group_name FROM hosts
         WHERE group_name IS NOT NULL AND group_name <> 'default';
     `);
+  }
+
+  if (currentVersion < 13) {
+    // V3-09: SSH bastion / agent forwarding / host-key verification. Three
+    // additive, nullable columns on hosts. All default safely so existing
+    // hosts behave exactly as before (no jump host, no agent forwarding, no
+    // fingerprint -> TOFU records it on next connect). Idempotent via
+    // addColumnIfNotExists.
+    logger.info(`Running migration v13: hosts SSH bastion/agentForward/hostKey columns`);
+    addColumnIfNotExists(database, 'hosts', 'jump_host_id', 'TEXT');
+    addColumnIfNotExists(database, 'hosts', 'agent_forward', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfNotExists(database, 'hosts', 'host_key_fingerprint', 'TEXT');
   }
 
   setUserVersion(database, targetVersion);

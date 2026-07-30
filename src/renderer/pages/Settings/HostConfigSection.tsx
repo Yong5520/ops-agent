@@ -370,6 +370,7 @@ export function HostConfigSection() {
       {showForm && (
         <HostForm
           editing={editing}
+          allHosts={hosts}
           onClose={() => {
             setShowForm(false);
             setEditing(null);
@@ -401,10 +402,12 @@ export function HostConfigSection() {
 
 function HostForm({
   editing,
+  allHosts,
   onSave,
   onClose,
 }: {
   editing: HostConfig | null;
+  allHosts: HostConfig[];
   onSave: (input: HostInput) => Promise<void>;
   onClose: () => void;
 }) {
@@ -419,6 +422,9 @@ function HostForm({
   const [suPassword, setSuPassword] = useState('');
   const [groupName, setGroupName] = useState(editing?.groupName ?? 'default');
   const [timeoutMs, setTimeoutMs] = useState(editing?.timeoutMs ?? 60000);
+  // V3-09: SSH bastion / agent forwarding / host-key fields.
+  const [jumpHostId, setJumpHostId] = useState(editing?.jumpHostId ?? '');
+  const [agentForward, setAgentForward] = useState(editing?.agentForward ?? false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -440,6 +446,9 @@ function HostForm({
         suPassword: suPassword || undefined,
         groupName: groupName.trim(),
         timeoutMs,
+        jumpHostId: jumpHostId || undefined,
+        agentForward,
+        hostKeyFingerprint: editing?.hostKeyFingerprint,
       };
       await onSave(input);
     } catch (err) {
@@ -567,6 +576,38 @@ function HostForm({
             onChange={(e) => setTimeoutMs(Number(e.target.value))}
           />
         </Field>
+        {/* V3-09: SSH bastion / agent forwarding / host-key verification. */}
+        <Field label="堡垒机 / 跳板机（可选，经此主机中转连接）">
+          <Select value={jumpHostId} onChange={(e) => setJumpHostId(e.target.value)}>
+            <option value="">不使用（直连）</option>
+            {/* Exclude self to prevent a jump-to-self cycle. */}
+            {allHosts
+              .filter((h) => h.id !== editing?.id)
+              .map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.name} ({h.host})
+                </option>
+              ))}
+          </Select>
+        </Field>
+        <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={agentForward}
+            onChange={(e) => setAgentForward(e.target.checked)}
+            className="h-4 w-4 rounded border-zinc-700 bg-zinc-900"
+          />
+          启用 SSH Agent 转发（目标主机可复用本地 agent 凭据）
+        </label>
+        {editing?.hostKeyFingerprint && (
+          <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-400">
+            <span className="font-medium text-zinc-300">主机密钥指纹（已记录）：</span>
+            <code className="ml-1 break-all font-mono">{editing.hostKeyFingerprint}</code>
+            <div className="mt-1 text-zinc-500">
+              首次连接时自动记录，后续连接校验此指纹以防中间人攻击。
+            </div>
+          </div>
+        )}
         <div className="flex justify-end gap-2 border-t border-zinc-800 pt-3">
           <Button variant="ghost" onClick={onClose} disabled={submitting}>
             取消
@@ -667,6 +708,7 @@ function ImportModal({
         keyPath: authType === 'key' ? keyPath : undefined,
         groupName,
         timeoutMs: 60000,
+        agentForward: false,
       });
     }
 

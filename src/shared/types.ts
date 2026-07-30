@@ -22,6 +22,10 @@ export interface HostConfig {
   suPassword?: string;
   groupName: string;
   timeoutMs: number;
+  // V3-09: SSH bastion / agent forwarding / host-key verification.
+  jumpHostId?: string; // FK to another host used as a jump/bastion
+  agentForward: boolean; // enable OpenSSH agent forwarding
+  hostKeyFingerprint?: string; // expected SHA256 fingerprint (TOFU)
   createdAt: string;
   updatedAt: string;
 }

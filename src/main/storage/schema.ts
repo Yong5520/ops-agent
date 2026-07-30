@@ -16,6 +16,14 @@ CREATE TABLE IF NOT EXISTS hosts (
   su_password   TEXT,
   group_name    TEXT DEFAULT 'default',
   timeout_ms    INTEGER NOT NULL DEFAULT 120000,
+  -- V3-09: SSH bastion / agent forwarding / host-key verification.
+  -- jump_host_id: FK to another hosts row to use as a jump/bastion host.
+  -- agent_forward: 1 to enable OpenSSH agent forwarding on this connection.
+  -- host_key_fingerprint: expected SHA256 fingerprint (TOFU: empty on first
+  --   connect, recorded automatically, verified thereafter).
+  jump_host_id          TEXT,
+  agent_forward         INTEGER NOT NULL DEFAULT 0,
+  host_key_fingerprint  TEXT,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );

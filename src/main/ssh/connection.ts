@@ -1,4 +1,5 @@
 import { Client } from 'ssh2';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { SshClientConfig, ConnectionState } from './types.js';
 import { logger } from '../utils/logger.js';
@@ -25,11 +26,81 @@ export class OpsAgentError extends Error {
   }
 }
 
+/**
+ * Compute the OpenSSH-format SHA256 fingerprint of a host public key.
+ * Returns "SHA256:<base64>" with trailing `=` padding stripped, matching
+ * `ssh-keygen -lf`. Used by hostVerifier (verify path) + TOFU capture.
+ */
+export function fingerprintOfHostKey(key: Buffer | string): string {
+  const buf = Buffer.isBuffer(key) ? key : Buffer.from(key);
+  return 'SHA256:' + createHash('sha256').update(buf).digest('base64').replace(/=+$/, '');
+}
+
+/**
+ * Build the ssh2 connect-config object from an SshClientConfig (V3-09 extracted
+ * from connect() so it is unit-testable). Pure - no ssh2 Client needed.
+ *
+ * V3-09: agentForward passthrough + host-key verification / TOFU capture.
+ * - hostKeyFingerprint set: verify against it.
+ * - hostKeyFingerprint unset but onHostKey provided: TOFU - capture + accept.
+ * - neither: no hostVerifier (legacy).
+ * The `sock` (jump-host stream) is assigned in connect() after awaiting
+ * getJumpStream - not here, because getJumpStream is async.
+ */
+export function buildConnectConfig(
+  config: SshClientConfig,
+  opts: { onHostKey?: (fingerprint: string) => void } = {},
+): Record<string, unknown> {
+  const connectConfig: Record<string, unknown> = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    readyTimeout: 30_000,
+    keepaliveInterval: 30_000,
+    keepaliveCountMax: 3,
+  };
+  if (config.password) connectConfig.password = config.password;
+  if (config.privateKey) connectConfig.privateKey = config.privateKey;
+  if (config.passphrase) connectConfig.passphrase = config.passphrase;
+
+  // V3-09: agent forwarding.
+  if (config.agentForward) connectConfig.agentForward = true;
+
+  // V3-09: host-key verification. ssh2 calls hostVerifier(key, verify) during
+  // kex; verify(true) accepts, verify(false) rejects (fails the connection).
+  if (config.hostKeyFingerprint) {
+    const expected = config.hostKeyFingerprint;
+    connectConfig.hostVerifier = (key: Buffer | string, verify: (ok: boolean) => void) => {
+      const actual = fingerprintOfHostKey(key);
+      const ok = actual === expected;
+      if (!ok) {
+        logger.warn(`[SSH] Host key fingerprint mismatch: expected ${expected}, got ${actual}`);
+      }
+      verify(ok);
+    };
+  } else if (opts.onHostKey) {
+    // TOFU: first connect to an unknown host - capture the fingerprint for
+    // persistence and accept (verify true) so the connection proceeds.
+    const onHostKey = opts.onHostKey;
+    connectConfig.hostVerifier = (key: Buffer | string, verify: (ok: boolean) => void) => {
+      const actual = fingerprintOfHostKey(key);
+      logger.info(`[SSH] TOFU: recording host key fingerprint ${actual}`);
+      onHostKey(actual);
+      verify(true);
+    };
+  }
+
+  return connectConfig;
+}
+
 export class SSHConnectionManager extends EventEmitter {
   private conn: Client | null = null;
   private readonly config: SshClientConfig;
   private isConnecting = false;
   private connectionPromise: Promise<void> | null = null;
+  // V3-09: TOFU host-key capture callback. Set by the pool so the first
+  // connection to an unverified host can record its fingerprint for persistence.
+  onHostKey?: (fingerprint: string) => void;
   // Persistent su shell stream (when suPassword is configured)
   private suShell: {
     write: (data: string) => void;
@@ -105,6 +176,22 @@ export class SSHConnectionManager extends EventEmitter {
     this.isConnecting = true;
     this.setState('connecting');
 
+    // V3-09: obtain the jump-host stream BEFORE constructing the connect
+    // promise (the promise executor is synchronous, so it cannot await).
+    // The stream is then passed as `sock` to ssh2.Client.connect().
+    let jumpSock: unknown;
+    if (this.config.getJumpStream) {
+      try {
+        jumpSock = await this.config.getJumpStream();
+      } catch (err) {
+        this.isConnecting = false;
+        this.setState('error', (err as Error).message);
+        throw err instanceof OpsAgentError
+          ? err
+          : new OpsAgentError((err as Error).message, 'SSH_ERROR');
+      }
+    }
+
     this.connectionPromise = new Promise<void>((resolve, reject) => {
       this.conn = new Client();
       const timeoutId = setTimeout(() => {
@@ -157,17 +244,15 @@ export class SSHConnectionManager extends EventEmitter {
         this.setState('disconnected');
       });
 
-      const connectConfig: Record<string, unknown> = {
-        host: this.config.host,
-        port: this.config.port,
-        username: this.config.username,
-        readyTimeout: 30_000,
-        keepaliveInterval: 30_000,
-        keepaliveCountMax: 3,
-      };
-      if (this.config.password) connectConfig.password = this.config.password;
-      if (this.config.privateKey) connectConfig.privateKey = this.config.privateKey;
-      if (this.config.passphrase) connectConfig.passphrase = this.config.passphrase;
+      const connectConfig = buildConnectConfig(this.config, {
+        onHostKey: this.onHostKey,
+      });
+
+      // V3-09: jump/bastion host - pass the stream obtained above as `sock` so
+      // ssh2 tunnels the target connection through the bastion.
+      if (jumpSock !== undefined) {
+        connectConfig.sock = jumpSock;
+      }
 
       this.conn!.connect(connectConfig);
     });

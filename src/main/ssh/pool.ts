@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
 import { SSHConnectionManager, OpsAgentError } from './connection.js';
 import { CircuitBreaker, type CircuitState } from './circuit-breaker.js';
+import { buildSshConfig as buildSshConfigPure } from './build-ssh-config.js';
 import { hostsStore } from '../storage/hosts.js';
 import { hasActiveTerminal } from './active-terminals.js';
 import { logger } from '../utils/logger.js';
@@ -46,7 +46,10 @@ export class ConnectionPool extends EventEmitter {
     return breaker;
   }
 
-  async get(hostId: string): Promise<SSHConnectionManager> {
+  // V3-09: `visited` is threaded through jump-host chains for cycle detection.
+  // External callers omit it; openJumpStream passes the accumulating set so an
+  // A->B->A bastion chain is caught instead of infinite-recursing.
+  async get(hostId: string, visited?: Set<string>): Promise<SSHConnectionManager> {
     let mgr = this.pool.get(hostId);
     if (mgr && mgr.isConnected()) {
       this.lastActivity.set(hostId, Date.now());
@@ -79,7 +82,12 @@ export class ConnectionPool extends EventEmitter {
       );
     }
 
-    const config = this.buildSshConfig(host);
+    // V3-09: seed cycle detection with the current host's id (and any visited
+    // set threaded from a parent jump chain). External callers pass no visited
+    // set, so we start one with this host.
+    const visitedSet = visited ?? new Set([host.id]);
+    if (!visitedSet.has(host.id)) visitedSet.add(host.id);
+    const config = this.buildSshConfig(host, visitedSet);
     const snapshot = JSON.stringify({
       host: host.host,
       port: host.port,
@@ -89,12 +97,34 @@ export class ConnectionPool extends EventEmitter {
       hasPassword: !!host.password,
       hasKey: !!host.keyPath,
       timeoutMs: host.timeoutMs,
+      // V3-09: bastion/agentForward/hostKey changes also force reconnect.
+      jumpHostId: host.jumpHostId,
+      agentForward: host.agentForward,
+      hostKeyFingerprint: host.hostKeyFingerprint,
     });
 
     mgr = new SSHConnectionManager(host.id, host.name, config);
     mgr.on('stateChange', (event: ConnectionEvent) => {
       this.emit('stateChange', event);
     });
+
+    // V3-09: TOFU host-key capture. When the host has no recorded fingerprint,
+    // the connection's hostVerifier captures the server's real fingerprint and
+    // hands it here. Persist via setHostKeyFingerprint (NOT update() - update()
+    // merges via get() which strips secrets, and would null the password).
+    // Guarded so a persistence failure never breaks the connection.
+    if (!host.hostKeyFingerprint) {
+      mgr.onHostKey = (fingerprint: string) => {
+        try {
+          hostsStore.setHostKeyFingerprint(host.id, fingerprint);
+          logger.info(`[Pool] Recorded host-key fingerprint for ${host.name}: ${fingerprint}`);
+        } catch (err) {
+          logger.warn(
+            `[Pool] Failed to persist host-key fingerprint for ${host.name}: ${(err as Error).message}`,
+          );
+        }
+      };
+    }
 
     try {
       await mgr.connect();
@@ -125,7 +155,7 @@ export class ConnectionPool extends EventEmitter {
       throw new Error(breaker.getBlockReason() ?? `主机 ${host.name} 断路器已触发`);
     }
 
-    const config = this.buildSshConfig(host);
+    const config = this.buildSshConfig(host, new Set([host.id]));
     // Use a short timeout for the test — don't make the user wait 60s.
     const testConfig = { ...config, timeoutMs: Math.min(config.timeoutMs, 10_000) };
     const testMgr = new SSHConnectionManager(host.id, host.name, testConfig);
@@ -144,26 +174,69 @@ export class ConnectionPool extends EventEmitter {
     }
   }
 
-  // Build an SshClientConfig from a decrypted HostConfig.
-  private buildSshConfig(host: HostConfig): SshClientConfig {
-    const config: SshClientConfig = {
-      host: host.host,
-      port: host.port,
-      username: host.username,
-      timeoutMs: host.timeoutMs,
-    };
-    if (host.authType === 'password' && host.password) {
-      config.password = host.password;
-    } else if (host.authType === 'key' && host.keyPath) {
-      try {
-        config.privateKey = readFileSync(host.keyPath, 'utf8');
-      } catch (err) {
-        throw new Error(`Failed to read SSH key at ${host.keyPath}: ${(err as Error).message}`);
-      }
+  // Build an SshClientConfig from a decrypted HostConfig. Delegates to the pure
+  // buildSshConfig (testable) and injects the jump-host stream provider when
+  // the host uses a bastion. `visited` is threaded through for cycle detection
+  // (A->B->A) across the recursive jump chain - each hop adds its jumpHostId.
+  private buildSshConfig(host: HostConfig, visited: Set<string>): SshClientConfig {
+    const getJumpStream = host.jumpHostId
+      ? () => this.openJumpStream(host, host.jumpHostId!, visited)
+      : undefined;
+    return buildSshConfigPure(host, { getJumpStream });
+  }
+
+  // V3-09: open a cascaded stream from a jump host to the target's host:port.
+  // Recursively connects to the jump host via pool.get (which itself may chain
+  // through another jump), then uses ssh2 forwardOut to tunnel TCP to the
+  // target. Cycle detection: add jumpHostId to `visited` BEFORE recursing so an
+  // A->B->A chain is caught (the recursive get()->buildSshConfig sees the
+  // growing set). Depth cap = 5.
+  private async openJumpStream(
+    target: HostConfig,
+    jumpHostId: string,
+    visited: Set<string>,
+  ): Promise<unknown> {
+    if (visited.has(jumpHostId)) {
+      throw new OpsAgentError(
+        `Jump-host cycle detected: host ${target.name} -> ${jumpHostId} (already visited). ` +
+          'Circular bastion chains are not allowed.',
+        'SSH_ERROR',
+      );
     }
-    if (host.sudoPassword) config.sudoPassword = host.sudoPassword;
-    if (host.suPassword) config.suPassword = host.suPassword;
-    return config;
+    if (visited.size >= 5) {
+      throw new OpsAgentError(
+        `Jump-host chain too deep (>=5) for host ${target.name}. Max chain depth is 5.`,
+        'SSH_ERROR',
+      );
+    }
+    // Add this hop BEFORE recursing so the jump host's own get() (and any
+    // further jump it triggers) sees it in the set.
+    visited.add(jumpHostId);
+    const jumpMgr = await this.get(jumpHostId, visited);
+    const conn = jumpMgr.getConnection();
+    return new Promise<unknown>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(
+          new OpsAgentError(
+            `[${target.name}] Jump-host stream to ${target.host}:${target.port} timed out`,
+            'SSH_TIMEOUT',
+          ),
+        );
+      }, 15_000);
+      conn.forwardOut('127.0.0.1', 0, target.host, target.port, (err, stream) => {
+        clearTimeout(timeoutId);
+        if (err) {
+          reject(
+            new OpsAgentError(
+              `Jump-host forwardOut to ${target.host}:${target.port} failed: ${err.message}`,
+              'SSH_ERROR',
+            ),
+          );
+          return;
+        }
+        resolve(stream);
+      });
+    });
   }
 
   // Force-close and reopen a specific host's connection (e.g., after config edit).

@@ -13,6 +13,15 @@ export interface SshClientConfig {
   sudoPassword?: string;
   suPassword?: string;
   timeoutMs: number;
+  // V3-09: SSH bastion / agent forwarding / host-key verification.
+  /** Enable OpenSSH agent forwarding on this connection. */
+  agentForward?: boolean;
+  /** Expected SHA256 host-key fingerprint. connection.ts builds the
+   * hostVerifier callback from this; empty = TOFU (record on first connect). */
+  hostKeyFingerprint?: string;
+  /** When set, connection.ts awaits this to obtain a stream from the jump host
+   * and passes it as `sock` to ssh2.Client.connect() (cascaded connection). */
+  getJumpStream?: () => Promise<unknown>;
 }
 
 // Connection state machine values.
