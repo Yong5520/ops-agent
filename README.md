@@ -52,6 +52,15 @@ npm run dist:win   # 打包 -> dist/OpsAgent-{version}-x64-setup.exe
 
 环境：Node.js 18+、npm 9+、Windows 10+。
 
+## Windows 安装包
+
+- **文件**：`OpsAgent-{version}-x64-setup.exe`（NSIS · Windows x64 · 当前 0.1.0 · 约 89 MB），由 `npm run dist:win` 生成于 `dist/`
+- **安装**：双击运行 → 选择安装目录（可更改，按用户安装无需管理员）→ 自动创建桌面快捷方式 + 开始菜单「OpsAgent」
+- **语言**：中文 / 英文
+- **卸载**：系统「设置 - 应用」或安装目录下的卸载程序
+- **首次启动**：在「设置」页配置模型与目标主机（见下文「配置」）
+- ⚠️ 未代码签名，首次运行 Windows SmartScreen 可能提示「未知发布者」，点击「更多信息 → 仍要运行」即可
+
 ## 配置
 
 应用内 **设置** 页：模型（端点 / Key / 模型名 / 单价，可测试连通性）、目标主机（分组 / 批量导入 / 堡垒机 / agent 转发 / 主机密钥）、安全模式、安全规则（编辑 `security-rules.json`）。主机凭据主密钥加密存于本地 SQLite，`master.key` 切勿提交。
