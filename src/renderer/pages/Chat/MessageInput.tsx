@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { Button } from '../../components/Button.js';
 import { useHostStore } from '../../store/hostStore.js';
+import { useSessionStore } from '../../store/sessionStore.js';
 import { cn } from '../../lib/cn.js';
 import type { Message } from '../../../shared/types.js';
 
@@ -73,6 +74,7 @@ export function MessageInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { hosts } = useHostStore();
+  const { hostIds } = useSessionStore();
 
   // Load skills list for autocomplete
   useEffect(() => {
@@ -109,8 +111,10 @@ export function MessageInput({
   const mentionMatches = useMemo(() => {
     if (!mention.active) return [];
     const q = mention.query.toLowerCase();
-    return hosts.filter((h) => h.name.toLowerCase().startsWith(q));
-  }, [mention, hosts]);
+    // Only suggest hosts already selected for this session (left sidebar) -
+    // reduces selection cost vs surfacing every configured host.
+    return hosts.filter((h) => hostIds.includes(h.id) && h.name.toLowerCase().startsWith(q));
+  }, [mention, hosts, hostIds]);
 
   // Slash command suggestions: built-in commands + enabled skills
   const slashMatches = useMemo(() => {

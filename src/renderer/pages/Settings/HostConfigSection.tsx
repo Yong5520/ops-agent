@@ -4,6 +4,7 @@ import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { Input, Field, Select } from '../../components/Form.js';
 import { GroupCreateInput } from './GroupCreateInput.js';
+import { groupHostsByFolder } from '../../utils/host-groups.js';
 import type { HostConfig, HostInput, AuthType } from '../../../shared/types.js';
 
 interface HostStatus {
@@ -145,24 +146,10 @@ export function HostConfigSection() {
     }
   };
 
-  // Group hosts by groupName for organized display
-  const grouped = hosts.reduce(
-    (acc, h) => {
-      const key = h.groupName || 'default';
-      (acc[key] ??= []).push(h);
-      return acc;
-    },
-    {} as Record<string, HostConfig[]>,
-  );
-  // Render order: explicitly-created folders (incl. empty ones from host_groups)
-  // unioned with any folders that currently hold hosts. 'default' first, then
-  // the rest alphabetical. Empty folders render with a placeholder.
-  const allGroups = Array.from(new Set([...groups, ...Object.keys(grouped)]));
-  allGroups.sort((a, b) => {
-    if (a === 'default') return -1;
-    if (b === 'default') return 1;
-    return a.localeCompare(b);
-  });
+  // Group hosts by folder for organized display. Explicitly-created folders
+  // (incl. empty ones) are unioned with host-derived folders; 'default' first,
+  // then the rest alphabetical. Shared util (also used by SessionSidebar).
+  const hostGroups = groupHostsByFolder(hosts, groups);
 
   return (
     <div className="space-y-4">
@@ -212,8 +199,7 @@ export function HostConfigSection() {
             尚未配置任何主机。点击"添加主机"或"批量导入"开始。
           </p>
         )}
-        {allGroups.map((group) => {
-          const groupHosts = grouped[group] ?? [];
+        {hostGroups.map(({ group, hosts: groupHosts }) => {
           const isCollapsed = collapsed.has(group);
           return (
             <div key={group}>
@@ -371,6 +357,7 @@ export function HostConfigSection() {
         <HostForm
           editing={editing}
           allHosts={hosts}
+          groups={groups}
           onClose={() => {
             setShowForm(false);
             setEditing(null);
@@ -403,11 +390,13 @@ export function HostConfigSection() {
 function HostForm({
   editing,
   allHosts,
+  groups,
   onSave,
   onClose,
 }: {
   editing: HostConfig | null;
   allHosts: HostConfig[];
+  groups: string[];
   onSave: (input: HostInput) => Promise<void>;
   onClose: () => void;
 }) {
@@ -537,11 +526,13 @@ function HostForm({
             </Select>
           </Field>
           <Field label="分组">
-            <Input
-              value={groupName}
-              onChange={(e) => setGroupName(e.target.value)}
-              placeholder="default"
-            />
+            <Select value={groupName} onChange={(e) => setGroupName(e.target.value)}>
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </Select>
           </Field>
         </div>
         {authType === 'password' ? (

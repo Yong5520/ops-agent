@@ -4,6 +4,7 @@ import { useHostStore } from '../../store/hostStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { cn } from '../../lib/cn.js';
+import { groupHostsByFolder } from '../../utils/host-groups.js';
 import type { SafetyMode } from '../../../shared/types.js';
 
 const SAFETY_MODES: Array<{ value: SafetyMode; label: string }> = [
@@ -12,6 +13,26 @@ const SAFETY_MODES: Array<{ value: SafetyMode; label: string }> = [
   { value: 'operator', label: '标准' },
   { value: 'autopilot', label: '自主' },
 ];
+
+// Collapsed-group state for the target-host selector (separate from Settings'
+// host-list collapse state so the two don't interfere).
+const COLLAPSED_KEY = 'opsagent.collapsedSessionGroups';
+function loadCollapsedGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_KEY);
+    if (raw) return new Set(JSON.parse(raw) as string[]);
+  } catch {
+    // ignore
+  }
+  return new Set();
+}
+function saveCollapsedGroups(set: Set<string>): void {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]));
+  } catch {
+    // ignore
+  }
+}
 
 export function SessionSidebar() {
   const {
@@ -27,7 +48,8 @@ export function SessionSidebar() {
     setSafetyMode,
     renameSession,
   } = useSessionStore();
-  const { hosts, load: loadHosts } = useHostStore();
+  const { hosts, groups, load: loadHosts } = useHostStore();
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
 
   useEffect(() => {
     load();
@@ -38,6 +60,16 @@ export function SessionSidebar() {
     const next = hostIds.includes(id) ? hostIds.filter((h) => h !== id) : [...hostIds, id];
     setHostIds(next);
   };
+
+  const toggleGroup = (group: string) => {
+    const next = new Set(collapsedGroups);
+    if (next.has(group)) next.delete(group);
+    else next.add(group);
+    setCollapsedGroups(next);
+    saveCollapsedGroups(next);
+  };
+
+  const hostGroups = groupHostsByFolder(hosts, groups);
 
   return (
     <div className="flex w-64 min-h-0 flex-col border-r border-zinc-800 bg-zinc-950">
@@ -57,24 +89,46 @@ export function SessionSidebar() {
         <div className="space-y-2 border-y border-zinc-800 px-3 py-3">
           <div>
             <label className="mb-1 block text-xs text-zinc-500">目标主机（可多选）</label>
-            <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900 p-1.5">
+            <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900 p-1.5">
               {hosts.length === 0 && <p className="px-1 py-1 text-xs text-zinc-600">未配置主机</p>}
-              {hosts.map((h) => {
-                const checked = hostIds.includes(h.id);
+              {hostGroups.map(({ group, hosts: groupHosts }) => {
+                const isCollapsed = collapsedGroups.has(group);
+                const selectedInGroup = groupHosts.filter((h) => hostIds.includes(h.id)).length;
                 return (
-                  <label
-                    key={h.id}
-                    className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-zinc-800"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleHost(h.id)}
-                      className="h-3.5 w-3.5 accent-zinc-400"
-                    />
-                    <span className="flex-1 truncate text-zinc-200">{h.name}</span>
-                    <span className="text-zinc-600">{h.host}</span>
-                  </label>
+                  <div key={group}>
+                    <button
+                      onClick={() => toggleGroup(group)}
+                      className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-xs font-medium text-zinc-400 hover:bg-zinc-800"
+                    >
+                      <span className="text-zinc-600">{isCollapsed ? '▸' : '▾'}</span>
+                      <span className="flex-1 truncate text-left">{group}</span>
+                      <span className="text-zinc-600">
+                        {selectedInGroup}/{groupHosts.length}
+                      </span>
+                    </button>
+                    {!isCollapsed && (
+                      <div className="ml-3 space-y-0.5">
+                        {groupHosts.map((h) => {
+                          const checked = hostIds.includes(h.id);
+                          return (
+                            <label
+                              key={h.id}
+                              className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-zinc-800"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleHost(h.id)}
+                                className="h-3.5 w-3.5 accent-zinc-400"
+                              />
+                              <span className="flex-1 truncate text-zinc-200">{h.name}</span>
+                              <span className="text-zinc-600">{h.host}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>

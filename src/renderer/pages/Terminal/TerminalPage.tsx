@@ -66,6 +66,19 @@ export function TerminalPage() {
     return () => removeExitListener();
   }, [updateTabStatus]);
 
+  // Ctrl+Shift+T opens a local terminal tab (works even with no host connected,
+  // so a user who only wants a local cmd/PowerShell can start one).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        e.preventDefault();
+        openLocalTab();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [openLocalTab]);
+
   const toggleGroup = (group: string) => {
     const next = new Set(collapsed);
     if (next.has(group)) {
@@ -212,8 +225,11 @@ export function TerminalPage() {
         {tabs.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center">
             <div className="text-4xl mb-3 opacity-30">{' />'}</div>
-            <p className="text-sm text-zinc-500">点击左侧主机开始终端会话</p>
-            <p className="mt-1 text-xs text-zinc-700">
+            <p className="text-sm text-zinc-500">点击左侧主机开始远程终端，或直接打开本地终端</p>
+            <Button variant="primary" size="sm" className="mt-3" onClick={() => openLocalTab()}>
+              本地终端
+            </Button>
+            <p className="mt-3 text-xs text-zinc-700">
               支持多标签 · 快捷键 Ctrl+Shift+T 新开 · Ctrl+W 关闭
             </p>
           </div>
