@@ -29,6 +29,7 @@ vi.mock('../memory/automem.js', () => ({
 
 import { buildSystemPrompt } from '../system-prompt.js';
 import type { TodoItem } from '../../../shared/types.js';
+import type { HostFacts } from '../facts.js';
 
 describe('buildSystemPrompt: meta-question rule', () => {
   it('tells the model to answer token/cost meta-questions WITHOUT host commands', () => {
@@ -100,5 +101,45 @@ describe('buildSystemPrompt: task list resume injection', () => {
       todos: [],
     });
     expect(dynamicSuffix).not.toContain('当前任务列表进度');
+  });
+});
+
+describe('buildSystemPrompt: host facts framing + scope adherence', () => {
+  // Regression: host facts surfaced "⚠ 失败的 systemd 服务" which the agent
+  // treated as an actionable task, investigating/fixing it even when the user
+  // only asked a narrow query (e.g. `ls /home`). Failed services must be
+  // framed as reference-only, without the actionable ⚠ marker.
+  it('frames failed services as reference-only without actionable ⚠', () => {
+    const hostFacts: HostFacts[] = [
+      {
+        hostId: 'h1',
+        hostName: 'host-1',
+        os: 'CentOS 7',
+        kernel: '3.10.0',
+        cpuCores: '8',
+        memoryTotal: '16G',
+        diskInfo: '/ 50G',
+        failedUnits: ['gssproxy.service'],
+        recentDmesg: [],
+        cachedAt: 0,
+      },
+    ];
+    const { dynamicSuffix } = buildSystemPrompt({
+      selectedHostIds: [],
+      safetyMode: 'operator',
+      hostFacts,
+    });
+    expect(dynamicSuffix).toContain('gssproxy.service');
+    expect(dynamicSuffix).not.toContain('⚠');
+    expect(dynamicSuffix).toMatch(/仅供参考/);
+  });
+
+  it('includes a no-scope-extension rule for runtime-state items', () => {
+    const { staticPrefix } = buildSystemPrompt({
+      selectedHostIds: [],
+      safetyMode: 'operator',
+    });
+    expect(staticPrefix).toMatch(/未经用户明确要求/);
+    expect(staticPrefix).toMatch(/不.*延伸|不得.*展开调查/);
   });
 });
