@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { APICallError } from 'ai';
 import {
   formatModelError,
   formatExecutionErrorMessage,
@@ -169,6 +170,19 @@ describe('isModelError', () => {
   });
   it('returns true for "model does not exist on endpoint" validation error', () => {
     expect(isModelError(new Error('模型 "foo" 在端点上不存在'))).toBe(true);
+  });
+  it('returns true for an APICallError with a statusCode even without a signature message', () => {
+    // A 429 whose message is just "Too Many Requests" (no "429" digit, no
+    // "rate limit") must still be recognized as a model error via the
+    // APICallError statusCode, so the loop frames it as 模型异常.
+    const err = new APICallError({
+      message: 'Too Many Requests',
+      url: 'https://example.com',
+      requestBodyValues: {},
+      statusCode: 429,
+      isRetryable: true,
+    });
+    expect(isModelError(err)).toBe(true);
   });
 
   it('does NOT false-match 429 inside a hex id', () => {

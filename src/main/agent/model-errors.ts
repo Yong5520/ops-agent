@@ -8,6 +8,8 @@
 //   - isTransientNetworkError: is it worth auto-retrying (brief backoff)?
 //   - isUnreachableEndpoint: is the host/port dead (skip retries, fail fast)?
 
+import { APICallError } from 'ai';
+
 const HTTP_401_PATTERN = /\b401\b/;
 const HTTP_429_PATTERN = /\b429\b/;
 // 500/502/503 (NOT 504, which is a gateway timeout - usually transient).
@@ -88,12 +90,16 @@ export function formatModelError(err: Error): string {
 // Conservative by design: an error is a model error only if its message
 // matches a known model-API signature (or an HTTP 4xx/429/5xx code). SSH auth
 // failures, command timeouts, and tool errors do NOT match and are correctly
-// treated as non-model (execution) errors.
+// treated as non-model (execution) errors. An APICallError from the AI SDK
+// always carries a model-API statusCode, so trust that even when the message
+// itself lacks a recognizable signature (e.g. "Too Many Requests" with no
+// "429" digit).
 export function isModelError(err: Error): boolean {
   const msg = err.message ?? '';
   if (HTTP_401_PATTERN.test(msg)) return true;
   if (HTTP_429_PATTERN.test(msg)) return true;
   if (HTTP_50X_PATTERN.test(msg)) return true;
+  if (APICallError.isInstance(err) && err.statusCode != null) return true;
   return MODEL_ERROR_SIGNATURES.some((sig) => msg.includes(sig));
 }
 

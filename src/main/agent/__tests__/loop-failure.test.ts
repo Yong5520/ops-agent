@@ -14,35 +14,82 @@ const mocks = vi.hoisted(() => ({
   // Captures every assistant message saved by the loop so we can assert on
   // what gets persisted to the (mocked) DB.
   savedAssistantMessages: [] as Array<{ sessionId: string; content: string }>,
+  // Single error yielded on EVERY streamText call (legacy/simple mode). When
+  // set, every attempt fails with this error. Null = use sequence mode.
   streamTextThrow: null as Error | null,
+  // Sequence mode: each streamText call consumes one scripted outcome.
+  // `{ error: '...' }` yields an error part; `{ text: '...' }` yields a
+  // text-delta + a stop finish (success). Takes priority over streamTextThrow.
+  streamTextSequence: [] as Array<{ error: string } | { text: string }>,
+  // Optional text-delta yielded BEFORE the error in simple mode, to simulate a
+  // mid-stream failure (text already streamed -> must NOT retry).
+  preErrorText: '' as string,
   // Counts how many times streamText was called - to verify fast-fail
-  // (connect-timeout must NOT trigger the retry cycle).
+  // (connect-timeout must NOT trigger the retry cycle) and retry counts.
   streamTextCallCount: 0,
 }));
 
 // Mock the AI SDK. streamText returns an object whose fullStream is an async
-// iterable that yields an 'error' part - this is how the real SDK surfaces a
-// connect-timeout (the call doesn't throw synchronously; the error arrives
-// during stream iteration, which is where loop.ts's retry logic lives).
-function makeStreamTextErrorPart(errorMessage: string) {
+// iterable. In simple mode it yields an 'error' part (optionally preceded by a
+// text-delta to simulate a mid-stream failure); in sequence mode each call
+// consumes one scripted outcome (error or success). This is how the real SDK
+// surfaces a connect-timeout / 429 / 5xx - the call doesn't throw
+// synchronously; the error arrives during stream iteration, which is where
+// loop.ts's retry logic lives.
+function makeStreamText(parts: Array<Record<string, unknown>>) {
   return {
     fullStream: (async function* () {
-      yield { type: 'error', error: new Error(errorMessage) };
+      for (const p of parts) yield p;
     })(),
     response: Promise.resolve({ messages: [] }),
   };
 }
 
-vi.mock('ai', () => ({
-  streamText: (..._args: unknown[]) => {
-    mocks.streamTextCallCount++;
-    if (mocks.streamTextThrow) {
-      if (mocks.streamTextThrow.name === 'AbortError') throw mocks.streamTextThrow;
-      return makeStreamTextErrorPart(mocks.streamTextThrow.message);
-    }
-    throw new Error('streamText mock not configured');
-  },
-}));
+vi.mock('ai', async () => {
+  const actual = await vi.importActual('ai');
+  return {
+    ...actual,
+    streamText: (..._args: unknown[]) => {
+      mocks.streamTextCallCount++;
+      // Sequence mode: one scripted outcome per call.
+      if (mocks.streamTextSequence.length > 0) {
+        const outcome = mocks.streamTextSequence.shift()!;
+        if ('error' in outcome) {
+          return makeStreamText([{ type: 'error', error: new Error(outcome.error) }]);
+        }
+        // Success: a text-delta followed by a stop finish.
+        return makeStreamText([
+          { type: 'text-delta', textDelta: outcome.text },
+          {
+            type: 'finish',
+            finishReason: 'stop',
+            usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+          },
+        ]);
+      }
+      if (mocks.streamTextThrow) {
+        if (mocks.streamTextThrow.name === 'AbortError') throw mocks.streamTextThrow;
+        const parts: Array<Record<string, unknown>> = [];
+        if (mocks.preErrorText) {
+          parts.push({ type: 'text-delta', textDelta: mocks.preErrorText });
+        }
+        parts.push({ type: 'error', error: new Error(mocks.streamTextThrow.message) });
+        return makeStreamText(parts);
+      }
+      throw new Error('streamText mock not configured');
+    },
+  };
+});
+
+// model-retry: real classification + formatting (so the tests exercise the
+// actual policy), but getRetryDelay -> 0 so retries don't wait on real timers.
+vi.mock('../model-retry.js', async () => {
+  const actual = await vi.importActual('../model-retry.js');
+  return {
+    ...actual,
+    getRetryDelay: () => 0,
+  };
+});
 
 vi.mock('../providers.js', () => ({
   // The loop now resolves a provider (per-session override -> global default)
@@ -101,12 +148,33 @@ vi.mock('../stall-detection.js', () => ({
   evaluateStallDecision: () => ({ shouldNudge: false, reason: 'substantive' }),
 }));
 
+// Wire feedTextDelta -> config.onText so the loop's roundText accumulator
+// (and onTextStream) actually reflect streamed text. The real thinking-stream
+// does this; the no-op mock would hide mid-stream text from the retry logic.
 vi.mock('../thinking-stream.js', () => ({
-  createThinkingStream: () => ({
-    feedTextDelta: vi.fn(),
+  createThinkingStream: (config: { onText?: (delta: string) => void }) => ({
+    feedTextDelta: (delta: string) => config.onText?.(delta),
     feedReasoningDelta: vi.fn(),
     closeCurrent: vi.fn(),
   }),
+}));
+
+vi.mock('../loop-repetition-guard.js', () => ({
+  detectRepetition: () => null,
+}));
+
+vi.mock('../cost-tracking.js', () => ({
+  extractUsage: () => ({
+    promptTokens: 10,
+    completionTokens: 5,
+    totalTokens: 15,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  }),
+}));
+
+vi.mock('../../storage/cost-store.js', () => ({
+  recordSessionCost: vi.fn(),
 }));
 
 vi.mock('../denial-tracking.js', () => ({
@@ -145,6 +213,7 @@ vi.mock('../../utils/logger.js', () => ({
 
 // Import AFTER mocks are registered.
 import { runAgentLoop } from '../loop.js';
+import { MAX_RETRIES } from '../model-retry.js';
 import type { AgentLoopParams } from '../types.js';
 
 // Minimal params: the loop fails before invoking most callbacks, so stubs
@@ -174,6 +243,8 @@ describe('loop failure path (Fix A: failure marker)', () => {
   beforeEach(() => {
     mocks.savedAssistantMessages = [];
     mocks.streamTextThrow = null;
+    mocks.streamTextSequence = [];
+    mocks.preErrorText = '';
     mocks.streamTextCallCount = 0;
   });
 
@@ -260,6 +331,8 @@ describe('loop failure path: model-error tagging (功能 2)', () => {
   beforeEach(() => {
     mocks.savedAssistantMessages = [];
     mocks.streamTextThrow = null;
+    mocks.streamTextSequence = [];
+    mocks.preErrorText = '';
     mocks.streamTextCallCount = 0;
   });
 
@@ -299,5 +372,97 @@ describe('loop failure path: model-error tagging (功能 2)', () => {
 
     const marker = mocks.savedAssistantMessages[0]!;
     expect(marker.content).toContain('模型异常');
+  });
+});
+
+describe('loop failure path: 5-retry policy (类 Claude Code 重试机制)', () => {
+  beforeEach(() => {
+    mocks.savedAssistantMessages = [];
+    mocks.streamTextThrow = null;
+    mocks.streamTextSequence = [];
+    mocks.preErrorText = '';
+    mocks.streamTextCallCount = 0;
+  });
+
+  it('retries a soft 429 rate-limit up to 5 times, then surfaces "限速"', async () => {
+    mocks.streamTextThrow = new Error('429 Too Many Requests');
+    const onError = vi.fn();
+    await runAgentLoop(makeParams({ onError }));
+
+    // 1 initial attempt + 5 retries = 6 total calls.
+    expect(mocks.streamTextCallCount).toBe(MAX_RETRIES + 1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    const errMsg = (onError.mock.calls[0]![0] as Error).message;
+    expect(errMsg).toContain('模型异常');
+    expect(errMsg).toMatch(/限速/);
+  });
+
+  it('fails FAST on a hard quota 429 (no retry) and names the quota', async () => {
+    // "exceeded your current quota" is a hard usage-limit signature -> the loop
+    // must NOT spend ~30s retrying; it surfaces immediately.
+    mocks.streamTextThrow = new Error('429 exceeded your current quota');
+    const onError = vi.fn();
+    await runAgentLoop(makeParams({ onError }));
+
+    expect(mocks.streamTextCallCount).toBe(1);
+    const errMsg = (onError.mock.calls[0]![0] as Error).message;
+    expect(errMsg).toMatch(/限额/);
+  });
+
+  it('retries a transient network error (ECONNRESET) 5 times, then surfaces "网络"', async () => {
+    mocks.streamTextThrow = new Error('ECONNRESET');
+    const onError = vi.fn();
+    await runAgentLoop(makeParams({ onError }));
+
+    expect(mocks.streamTextCallCount).toBe(MAX_RETRIES + 1);
+    const errMsg = (onError.mock.calls[0]![0] as Error).message;
+    expect(errMsg).toMatch(/网络|连接/);
+  });
+
+  it('recovers when a retryable error clears on a later attempt', async () => {
+    // 2 failures (429) then success on the 3rd call.
+    mocks.streamTextSequence = [
+      { error: '429 Too Many Requests' },
+      { error: '429 Too Many Requests' },
+      { text: '{"command":"ls","explanation":"列出","safetyLevel":"read"}' },
+    ];
+    const onError = vi.fn();
+    const onComplete = vi.fn();
+    await runAgentLoop(makeParams({ onError, onComplete }));
+
+    expect(mocks.streamTextCallCount).toBe(3);
+    expect(onError).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT retry when text was already streamed this round (inlines the error)', async () => {
+    // Mid-stream failure: partial text reached the UI. Retrying would
+    // re-stream and duplicate that text, so the loop inlines the error and
+    // stops (single attempt).
+    mocks.preErrorText = 'partial answer already shown';
+    mocks.streamTextThrow = new Error('429 Too Many Requests');
+    const onError = vi.fn();
+    const onComplete = vi.fn();
+    await runAgentLoop(makeParams({ onError, onComplete }));
+
+    expect(mocks.streamTextCallCount).toBe(1);
+    expect(onError).not.toHaveBeenCalled();
+    // The inlined error is surfaced via onComplete (partial turn preserved).
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const finalText = onComplete.mock.calls[0]![0] as string;
+    expect(finalText).toContain('partial answer already shown');
+    expect(finalText).toMatch(/限速|模型异常/);
+  });
+
+  it('fails FAST on connect-timeout (fatal-endpoint) without retrying', async () => {
+    mocks.streamTextThrow = new Error(
+      'Failed after 3 attempts. Last error: Cannot connect to API: Connect Timeout Error',
+    );
+    const onError = vi.fn();
+    await runAgentLoop(makeParams({ onError }));
+
+    expect(mocks.streamTextCallCount).toBe(1);
+    const errMsg = (onError.mock.calls[0]![0] as Error).message;
+    expect(errMsg).toMatch(/无法连接|端点|不可达/);
   });
 });

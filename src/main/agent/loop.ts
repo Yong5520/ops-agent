@@ -20,11 +20,14 @@ import { detectRepetition } from './loop-repetition-guard.js';
 import { extractUsage, type ModelPricing } from './cost-tracking.js';
 import { recordSessionCost } from '../storage/cost-store.js';
 import { taskListsStore } from '../storage/task-lists.js';
+import { formatExecutionErrorMessage, isModelError } from './model-errors.js';
 import {
-  formatExecutionErrorMessage,
-  isTransientNetworkError,
-  isUnreachableEndpoint,
-} from './model-errors.js';
+  classifyModelError,
+  shouldRetry,
+  getRetryDelay,
+  formatModelFailureMessage,
+  MAX_RETRIES,
+} from './model-retry.js';
 import {
   createDenialTracker,
   recordDenial,
@@ -54,6 +57,17 @@ import type { ThinkingBlock, TodoItem } from '../../shared/types.js';
 //
 // Security and authorization are handled inside each tool's execute function
 // (see tools.ts). The loop itself is agnostic to safety mode.
+
+// Pick the user-facing failure message for an error that reached the outer
+// catch. Model-API errors (auth/rate-limit/quota/timeout/5xx/connection to the
+// model host) get the retry-aware formatModelFailureMessage (names the
+// category + appends the API's own reason); everything else (SSH, tools, local
+// parse failures) gets the 模型异常/执行异常-tagged formatExecutionErrorMessage.
+function friendlyErrorMessage(error: Error): string {
+  return isModelError(error)
+    ? formatModelFailureMessage(error)
+    : formatExecutionErrorMessage(error);
+}
 
 export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
   const { sessionId, userMessage, hostIds, safetyMode, maxSteps = 50, abortSignal } = params;
@@ -320,14 +334,19 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       // Microcompact (truncate large tool results) + Snip (remove old tool results)
       messages = compactMessages(messages, budgetTracker.contextWindow);
 
-      // Auto-retry wrapper for network errors (ECONNRESET, ETIMEDOUT, etc.)
-      // The AI SDK internally retries 3 times but still throws for persistent
-      // network issues. We add an outer retry layer that re-attempts with
-      // the full message history so previously executed tool results are
+      // Auto-retry wrapper for model API failures (类 Claude Code 重试机制).
+      // maxRetries: 0 disables the AI SDK's internal retry so we own the full
+      // policy: up to MAX_RETRIES (5) retries with exponential backoff, on any
+      // recoverable category (transient network / timeout / soft 429 / 5xx /
+      // unknown). Non-recoverable categories (401/403, bad model name, dead
+      // endpoint, hard usage quota) fail fast. See model-retry.ts. Re-attempts
+      // resend the full message history so previously executed tool results are
       // not lost on transient failures.
-      const MAX_API_RETRIES = 2;
-      const RETRY_DELAYS_MS = [2000, 5000]; // 2s, 5s
+      const MAX_API_RETRIES = MAX_RETRIES;
       let apiRetryCount = 0;
+      // Delay (ms) for the pending retry, set in the error handler and consumed
+      // in the catch block before the next attempt.
+      let pendingRetryDelayMs = 0;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let result: any = null;
       let streamConsumedSuccessfully = false;
@@ -340,6 +359,9 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
             tools,
             maxSteps,
             maxTokens: currentMaxTokens,
+            // 0 = let our outer retry layer own all retries (and see the raw
+            // APICallError with statusCode/responseBody on the first failure).
+            maxRetries: 0,
             abortSignal,
           });
 
@@ -394,37 +416,42 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
                 }
                 logger.error(`[Agent] Stream error: ${err.message}`);
 
-                // Fix B: connect-timeout / connection-refused means the host
-                // is dead. Skip the retry cycle (which would waste ~2 min) and
-                // surface the error immediately. Retrying a dead endpoint is
-                // pointless - the user needs to fix connectivity, not wait.
-                if (isUnreachableEndpoint(err)) {
+                const { category } = classifyModelError(err);
+
+                // Mid-stream safety: if answer text was already streamed this
+                // round, do NOT retry - re-streaming would duplicate it in the
+                // UI. Inline the tagged error and let the round finish.
+                if (roundText.length > 0) {
+                  roundText += `\n\n---\n${formatModelFailureMessage(err)}\n\uff08\u54cd\u5e94\u4e2d\u65ad\uff09`;
+                  break;
+                }
+
+                // Non-retryable category (auth/config/endpoint/quota): surface
+                // immediately. Retrying a bad key, a dead endpoint, or a
+                // hours-long usage block is pointless.
+                if (!shouldRetry(category)) {
                   logger.warn(
-                    `[Agent] Endpoint unreachable (${err.message.slice(0, 80)}), failing fast without retry`,
+                    `[Agent] ${category} error, failing fast without retry: ${err.message.slice(0, 120)}`,
                   );
                   throw err;
                 }
 
-                // Check if this is a transient network error worth retrying
-                const isTransient = isTransientNetworkError(err);
-                if (isTransient && apiRetryCount < MAX_API_RETRIES) {
-                  apiRetryCount++;
-                  logger.warn(
-                    `[Agent] Transient stream error (attempt ${apiRetryCount}/${MAX_API_RETRIES}), retrying after ${RETRY_DELAYS_MS[apiRetryCount - 1]}ms: ${err.message}`,
-                  );
-                  // Don't throw - break out of the for-await loop to retry
-                  throw new Error(`__RETRY__${err.message}`);
-                }
-
-                // Non-transient error or retries exhausted
-                if (!roundText && !fullText) {
+                // Retryable but retries exhausted: surface the terminal message
+                // (the outer catch formats it via formatModelFailureMessage).
+                if (apiRetryCount >= MAX_API_RETRIES) {
                   throw err;
                 }
-                // Partial text exists: inline the tagged error so the user
-                // sees the response was truncated AND where the failure came
-                // from (\u6a21\u578b\u5f02\u5e38 vs \u6267\u884c\u5f02\u5e38), instead of silently completing.
-                roundText += `\n\n---\n${formatExecutionErrorMessage(err)}\n\uff08\u54cd\u5e94\u4e2d\u65ad\uff09`;
-                break;
+
+                // Retryable with attempts remaining: schedule a retry with
+                // exponential backoff (respecting Retry-After for rate-limit).
+                apiRetryCount++;
+                pendingRetryDelayMs = getRetryDelay({ attempt: apiRetryCount - 1, category, err });
+                logger.warn(
+                  `[Agent] ${category} error (retry ${apiRetryCount}/${MAX_API_RETRIES}) after ${pendingRetryDelayMs}ms: ${err.message.slice(0, 120)}`,
+                );
+                // Break out of the for-await loop; the catch block waits
+                // pendingRetryDelayMs then re-enters the while for another attempt.
+                throw new Error(`__RETRY__${err.message}`);
               }
 
               case 'finish': {
@@ -523,10 +550,10 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
           const err = retryErr as Error;
           // Check if this is our internal retry signal
           if (err.message?.startsWith('__RETRY__')) {
-            // Wait before retry
-            const delayMs =
-              RETRY_DELAYS_MS[Math.min(apiRetryCount - 1, RETRY_DELAYS_MS.length - 1)];
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            // Wait before retry (pendingRetryDelayMs was set in the error
+            // handler via getRetryDelay). Abort during the wait is checked at
+            // the top of the next stream iteration.
+            await new Promise((resolve) => setTimeout(resolve, pendingRetryDelayMs));
             // Reset roundText for the retry - we'll re-stream from scratch
             roundText = '';
             continue;
@@ -537,8 +564,11 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
         }
       }
 
-      // If we exhausted retries without success, surface a tagged error so
-      // the user sees this as a model\u5f02\u5e38 (connection), not a raw exception.
+      // Safety net: if the retry loop exited without success and without a
+      // thrown terminal error (an unexpected code path), surface a tagged
+      // model-error message so the user sees this as a \u6a21\u578b\u5f02\u5e38, not a raw
+      // exception. In normal operation the error handler throws a terminal
+      // formatModelFailureMessage before reaching here.
       if (!streamConsumedSuccessfully && !roundText && !fullText) {
         const retryErr = new Error(
           `\u65e0\u6cd5\u8fde\u63a5\u6a21\u578b API\uff0c\u5df2\u91cd\u8bd5 ${MAX_API_RETRIES} \u6b21\u5747\u5931\u8d25\u3002\u8bf7\u68c0\u67e5\u6a21\u578b\u670d\u52a1\u662f\u5426\u6b63\u5e38\u8fd0\u884c\u3002`,
@@ -730,8 +760,10 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // the failure marker instead of being saved as a blank real message.
     if (hasSubstantiveText(fullText)) {
       // Tag the error so the user sees WHERE the failure came from (\u6a21\u578b\u5f02\u5e38 vs
-      // \u6267\u884c\u5f02\u5e38) instead of a raw exception string.
-      const errorNote = `\n\n---\n${formatExecutionErrorMessage(error)}\n\u5df2\u4fdd\u5b58\u5f53\u524d\u8fdb\u5ea6\u3002`;
+      // \u6267\u884c\u5f02\u5e38) instead of a raw exception string. Model-API errors get the
+      // retry-aware formatModelFailureMessage (named category + API reason);
+      // other errors get the tagged formatExecutionErrorMessage.
+      const errorNote = `\n\n---\n${friendlyErrorMessage(error)}\n\u5df2\u4fdd\u5b58\u5f53\u524d\u8fdb\u5ea6\u3002`;
       fullText += errorNote;
       saveAssistantMessage(sessionId, fullText, thinkingBlocks);
       // Call onComplete instead of onError so the renderer treats it as a
@@ -744,7 +776,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       // unanswered user message becomes an orphan that the model treats as a
       // pending task on the NEXT turn, causing it to re-run the failed task
       // instead of answering the new question (context pollution).
-      const friendly = formatExecutionErrorMessage(error);
+      const friendly = friendlyErrorMessage(error);
       const failureMarker = `${friendly}\n\n\u672a\u6267\u884c\u4efb\u4f55\u64cd\u4f5c\u3002\u8bf7\u5728\u6392\u67e5\u95ee\u9898\u540e\u91cd\u65b0\u63d0\u95ee\u3002`;
       saveAssistantMessage(sessionId, failureMarker, []);
       params.onError(new Error(friendly));

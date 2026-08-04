@@ -8,9 +8,33 @@ const mocks = vi.hoisted(() => ({
   refreshHostFactsInBackground: vi.fn(),
 }));
 
-vi.mock('ai', () => ({
-  generateText: (...args: unknown[]) => mocks.generateText(...args),
-}));
+vi.mock('ai', async () => {
+  const actual = await vi.importActual('ai');
+  return {
+    ...actual,
+    generateText: (...args: unknown[]) => mocks.generateText(...args),
+  };
+});
+
+// model-retry: real classification/formatting/retry logic, but inject zero
+// delay + no-op sleep so retry tests don't wait on real backoff timers. We
+// wrap retryModelRequest (rather than just overriding getRetryDelay) because
+// retryModelRequest closes over the module's original getRetryDelay/defaultSleep
+// — an exported-binding override wouldn't reach its internals.
+vi.mock('../model-retry.js', async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = (await vi.importActual('../model-retry.js')) as any;
+  return {
+    ...actual,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    retryModelRequest: (opts: any) =>
+      actual.retryModelRequest({
+        ...opts,
+        getDelay: opts.getDelay ?? (() => 0),
+        sleep: opts.sleep ?? (async () => {}),
+      }),
+  };
+});
 
 vi.mock('../facts.js', () => ({
   getCachedHostFacts: (...args: unknown[]) => mocks.getCachedHostFacts(...args),
@@ -34,6 +58,7 @@ vi.mock('../../utils/logger.js', () => ({
 }));
 
 import { parseCommandResponse, generateCommand, clearCommandCache } from '../ai-command.js';
+import { APICallError } from 'ai';
 
 describe('parseCommandResponse', () => {
   it('parses valid JSON response', () => {
@@ -234,5 +259,60 @@ describe('generateCommand - caching & non-blocking facts', () => {
     mocks.generateText.mockRejectedValue(new Error('The operation was aborted due to timeout'));
 
     await expect(generateCommand({ naturalLanguage: '慢命令' })).rejects.toThrow(/超时/);
+  });
+});
+
+describe('generateCommand - model request retry (类 Claude Code 重试机制)', () => {
+  beforeEach(() => {
+    clearCommandCache();
+    mocks.generateText.mockReset();
+  });
+
+  it('retries a soft 429 rate-limit and succeeds on a later attempt', async () => {
+    mocks.generateText
+      .mockRejectedValueOnce(new Error('429 Too Many Requests'))
+      .mockResolvedValueOnce({
+        text: '{"command":"ls","explanation":"列出","safetyLevel":"read"}',
+      });
+
+    const result = await generateCommand({ naturalLanguage: '列出文件' });
+
+    expect(result.command).toBe('ls');
+    expect(mocks.generateText).toHaveBeenCalledTimes(2); // 1 failed + 1 retry
+  });
+
+  it('does NOT retry a 401 auth error - fails immediately with an API Key hint', async () => {
+    mocks.generateText.mockRejectedValue(new Error('Unauthorized: invalid api key'));
+
+    await expect(generateCommand({ naturalLanguage: 'x' })).rejects.toThrow(/API Key|鉴权|授权/);
+    expect(mocks.generateText).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a transient network error (ECONNRESET) 5 times, then surfaces 网络', async () => {
+    mocks.generateText.mockRejectedValue(new Error('ECONNRESET'));
+
+    await expect(generateCommand({ naturalLanguage: 'x' })).rejects.toThrow(/网络|连接/);
+    // 1 initial attempt + 5 retries.
+    expect(mocks.generateText).toHaveBeenCalledTimes(6);
+  });
+
+  it('fails fast on a hard quota 429 and surfaces the API-returned reason', async () => {
+    // A 429 carrying a hard-quota body must NOT be retried; the provider's own
+    // reason text is appended to the user-facing message.
+    const quotaErr = new APICallError({
+      message: '429',
+      url: 'https://x.example.com',
+      requestBodyValues: {},
+      statusCode: 429,
+      responseBody: '{"error":{"message":"exceeded your current quota"}}',
+      data: { error: { message: 'exceeded your current quota' } },
+      isRetryable: false,
+    });
+    mocks.generateText.mockRejectedValue(quotaErr);
+
+    await expect(generateCommand({ naturalLanguage: 'x' })).rejects.toThrow(
+      /限额[\s\S]*exceeded your current quota/,
+    );
+    expect(mocks.generateText).toHaveBeenCalledTimes(1);
   });
 });

@@ -16,6 +16,7 @@ import { modelsStore } from '../storage/models.js';
 import { getCachedHostFacts, refreshHostFactsInBackground } from './facts.js';
 import { hostsStore } from '../storage/hosts.js';
 import { logger } from '../utils/logger.js';
+import { retryModelRequest, classifyModelError, shouldRetry } from './model-retry.js';
 
 export interface GeneratedCommand {
   command: string;
@@ -202,6 +203,11 @@ const JSON_OBJECT_PATTERN = /\{[\s\S]*\}/;
  * Call the active model for command generation, encapsulating the raw-HTTP
  * fallback for providers whose thinking blocks fail SDK validation
  * (e.g. glm-5.2 returns thinking blocks without the `signature` field).
+ *
+ * Retries recoverable failures (transient network / timeout / soft 429 / 5xx)
+ * up to MAX_RETRIES (5) via retryModelRequest, then surfaces a categorized,
+ * user-facing message (限速/超时/网络/5xx/限额/鉴权 + the API's own reason).
+ * SDK parse errors are NOT retried - they fall through to the raw-HTTP fallback.
  */
 async function generateCommandText(
   model: LanguageModel,
@@ -210,16 +216,41 @@ async function generateCommandText(
   maxTokens: number,
 ): Promise<string> {
   try {
-    const result = await generateText({
-      model,
-      system: systemPrompt,
-      prompt: naturalLanguage,
-      maxTokens,
-      abortSignal: AbortSignal.timeout(20_000),
+    const result = await retryModelRequest({
+      fn: () =>
+        generateText({
+          model,
+          system: systemPrompt,
+          prompt: naturalLanguage,
+          maxTokens,
+          // 0 = let retryModelRequest own all retries; this also makes the SDK
+          // surface the raw APICallError (statusCode/responseBody) on the
+          // first failure so classification + API-reason extraction are
+          // reliable (with the default maxRetries=2 the SDK wraps it as
+          // "Failed after N attempts" and the structured fields are lost).
+          maxRetries: 0,
+          abortSignal: AbortSignal.timeout(20_000),
+        }),
+      // SDK parse errors (glm-5.2 thinking blocks without signature) are
+      // deterministic - retrying won't help. Fail fast so the catch below can
+      // route to the raw-HTTP fallback.
+      shouldRetryError: (err) => {
+        const msg = err.message || '';
+        if (/Invalid JSON response|signature/i.test(msg)) return false;
+        return shouldRetry(classifyModelError(err).category);
+      },
+      onRetry: (attempt, err, delayMs) =>
+        logger.warn(
+          `[AI Command] retry ${attempt} after ${delayMs}ms: ${err.message.slice(0, 120)}`,
+        ),
     });
     return result.text;
   } catch (err) {
     const errMsg = (err as Error).message || '';
+    // SDK parse error -> raw HTTP fallback (bypasses SDK validation).
+    // retryModelRequest throws a formatModelFailureMessage whose 'unknown'
+    // text carries the original parse-error string, so we detect it here and
+    // recover via the raw path instead of surfacing the error.
     if (errMsg.includes('Invalid JSON response') || errMsg.includes('signature')) {
       logger.warn(`[AI Command] SDK failed (${errMsg.slice(0, 120)}), falling back to raw HTTP`);
       const provider = modelsStore.getActive();
@@ -233,9 +264,8 @@ async function generateCommandText(
         maxTokens,
       );
     }
-    if (errMsg.includes('timeout') || errMsg.includes('Timeout') || errMsg.includes('aborted')) {
-      throw new Error('AI 响应超时（20s），请重试或检查网络与模型端点');
-    }
+    // Otherwise the error is already a categorized formatModelFailureMessage
+    // (限速/超时/网络/5xx/限额/鉴权 + API reason) from retryModelRequest.
     throw err;
   }
 }
