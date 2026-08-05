@@ -11,7 +11,11 @@
 //   3. After the stream round, shouldNudgeAfterDenials() is checked
 //   4. If true, a nudge message is injected telling the model to use ask_user
 
-const DENIAL_THRESHOLD = 3;
+// Threshold lowered from 3 to 2 (Phase B1): with the strengthened per-rejection
+// feedback and the "reject and stop" option, two consecutive plain rejections
+// are a strong signal the model is on the wrong path - nudge it to ask_user
+// sooner rather than letting it burn a third attempt.
+const DENIAL_THRESHOLD = 2;
 const MAX_DENIAL_NUDGES = 2; // cap nudges to avoid infinite loop
 
 export interface DenialTracker {
@@ -54,17 +58,13 @@ export function recordApproval(tracker: DenialTracker): void {
 
 // Check if a denial nudge should be injected. If true, increments nudgeCount
 // so the nudge is not repeated indefinitely.
-export function shouldNudgeAfterDenials(
-  tracker: DenialTracker,
-): { shouldNudge: boolean; reason?: string } {
-  if (
-    tracker.consecutiveDenials >= DENIAL_THRESHOLD &&
-    tracker.nudgeCount < MAX_DENIAL_NUDGES
-  ) {
+export function shouldNudgeAfterDenials(tracker: DenialTracker): {
+  shouldNudge: boolean;
+  reason?: string;
+} {
+  if (tracker.consecutiveDenials >= DENIAL_THRESHOLD && tracker.nudgeCount < MAX_DENIAL_NUDGES) {
     tracker.nudgeCount++;
-    const cmdInfo = tracker.lastDeniedCommand
-      ? `（最近拒绝: ${tracker.lastDeniedCommand}）`
-      : '';
+    const cmdInfo = tracker.lastDeniedCommand ? `（最近拒绝: ${tracker.lastDeniedCommand}）` : '';
     return {
       shouldNudge: true,
       reason: `已连续 ${tracker.consecutiveDenials} 次拒绝授权${cmdInfo}`,

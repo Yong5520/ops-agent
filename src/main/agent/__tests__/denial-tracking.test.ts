@@ -67,26 +67,24 @@ describe('denial-tracking', () => {
     it('does not nudge when below threshold', () => {
       const tracker = createDenialTracker();
       recordDenial(tracker, 'exec', 'reason1');
-      recordDenial(tracker, 'exec', 'reason2');
       const result = shouldNudgeAfterDenials(tracker);
       expect(result.shouldNudge).toBe(false);
     });
 
-    it('nudges when threshold reached (3 denials)', () => {
+    it('nudges when threshold reached (2 denials)', () => {
       const tracker = createDenialTracker();
       recordDenial(tracker, 'exec', 'reason1', 'cmd1');
       recordDenial(tracker, 'exec', 'reason2', 'cmd2');
-      recordDenial(tracker, 'exec', 'reason3', 'cmd3');
       const result = shouldNudgeAfterDenials(tracker);
       expect(result.shouldNudge).toBe(true);
-      expect(result.reason).toContain('3');
-      expect(result.reason).toContain('cmd3');
+      expect(result.reason).toContain('2');
+      expect(result.reason).toContain('cmd2');
     });
 
     it('increments nudgeCount each time it nudges', () => {
       const tracker = createDenialTracker();
-      // Hit threshold 3 times (but MAX_NUDGES = 2, so only first 2 nudge)
-      for (let i = 0; i < 3; i++) {
+      // Hit threshold (but MAX_NUDGES = 2, so only first 2 nudge)
+      for (let i = 0; i < 2; i++) {
         recordDenial(tracker, 'exec', 'reason');
       }
       const r1 = shouldNudgeAfterDenials(tracker);
@@ -94,7 +92,7 @@ describe('denial-tracking', () => {
       expect(tracker.nudgeCount).toBe(1);
 
       // Reset consecutive to hit threshold again
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 2; i++) {
         recordDenial(tracker, 'exec', 'reason');
       }
       const r2 = shouldNudgeAfterDenials(tracker);
@@ -105,22 +103,21 @@ describe('denial-tracking', () => {
     it('stops nudging after MAX_DENIAL_NUDGES (2)', () => {
       const tracker = createDenialTracker();
       // First nudge
-      for (let i = 0; i < 3; i++) recordDenial(tracker, 'exec', 'reason');
+      for (let i = 0; i < 2; i++) recordDenial(tracker, 'exec', 'reason');
       shouldNudgeAfterDenials(tracker); // nudge 1
 
       // Second nudge
-      for (let i = 0; i < 3; i++) recordDenial(tracker, 'exec', 'reason');
+      for (let i = 0; i < 2; i++) recordDenial(tracker, 'exec', 'reason');
       shouldNudgeAfterDenials(tracker); // nudge 2
 
       // Third attempt - should NOT nudge
-      for (let i = 0; i < 3; i++) recordDenial(tracker, 'exec', 'reason');
+      for (let i = 0; i < 2; i++) recordDenial(tracker, 'exec', 'reason');
       const r3 = shouldNudgeAfterDenials(tracker);
       expect(r3.shouldNudge).toBe(false);
     });
 
     it('includes last denied command in reason when available', () => {
       const tracker = createDenialTracker();
-      recordDenial(tracker, 'sudo_exec', 'blocked', 'rm -rf /tmp');
       recordDenial(tracker, 'sudo_exec', 'blocked', 'rm -rf /tmp');
       recordDenial(tracker, 'sudo_exec', 'blocked', 'rm -rf /tmp');
       const result = shouldNudgeAfterDenials(tracker);
@@ -132,7 +129,6 @@ describe('denial-tracking', () => {
       const tracker = createDenialTracker();
       recordDenial(tracker, 'exec', 'reason1');
       recordDenial(tracker, 'exec', 'reason2');
-      recordDenial(tracker, 'exec', 'reason3');
       const result = shouldNudgeAfterDenials(tracker);
       expect(result.shouldNudge).toBe(true);
       expect(result.reason).not.toContain('最近拒绝');
@@ -142,10 +138,10 @@ describe('denial-tracking', () => {
   describe('resetDenialNudges', () => {
     it('resets nudgeCount and consecutiveDenials', () => {
       const tracker = createDenialTracker();
-      for (let i = 0; i < 3; i++) recordDenial(tracker, 'exec', 'reason');
+      for (let i = 0; i < 2; i++) recordDenial(tracker, 'exec', 'reason');
       shouldNudgeAfterDenials(tracker);
       expect(tracker.nudgeCount).toBe(1);
-      expect(tracker.consecutiveDenials).toBe(3);
+      expect(tracker.consecutiveDenials).toBe(2);
 
       resetDenialNudges(tracker);
       expect(tracker.nudgeCount).toBe(0);
@@ -154,25 +150,23 @@ describe('denial-tracking', () => {
   });
 
   describe('full denial + approval cycle', () => {
-    it('tracks a realistic session: 2 denials, approval, 3 denials, nudge', () => {
+    it('tracks a realistic session: 1 denial, approval, 2 denials, nudge', () => {
       const tracker = createDenialTracker();
 
-      // 2 denials
+      // 1 denial - below threshold
       recordDenial(tracker, 'exec', 'r1');
-      recordDenial(tracker, 'exec', 'r2');
       expect(shouldNudgeAfterDenials(tracker).shouldNudge).toBe(false);
 
       // Approval resets
       recordApproval(tracker);
       expect(tracker.consecutiveDenials).toBe(0);
 
-      // 3 more denials -> threshold hit
+      // 2 more denials -> threshold hit
       recordDenial(tracker, 'exec', 'r3', 'cmd3');
       recordDenial(tracker, 'exec', 'r4', 'cmd4');
-      recordDenial(tracker, 'exec', 'r5', 'cmd5');
       const nudge = shouldNudgeAfterDenials(tracker);
       expect(nudge.shouldNudge).toBe(true);
-      expect(tracker.totalDenials).toBe(5); // total across session
+      expect(tracker.totalDenials).toBe(3); // total across session (1 + 2)
     });
   });
 });

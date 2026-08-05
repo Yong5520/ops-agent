@@ -107,6 +107,7 @@ import {
   recordApproval,
   shouldNudgeAfterDenials,
 } from '../denial-tracking.js';
+import { auditStore } from '../../storage/audit.js';
 import type { Hook } from '../../../shared/types.js';
 
 // ── Test fixtures ──────────────────────────────────────────────────────
@@ -156,6 +157,7 @@ function makeTools(
     safetyMode?: 'sentinel' | 'operator' | 'autopilot' | 'plan';
     hooks?: Hook[];
     hostIds?: string[];
+    stopRequestedRef?: { current: boolean };
   } = {},
 ) {
   const safetyMode = overrides.safetyMode ?? 'autopilot';
@@ -164,6 +166,7 @@ function makeTools(
   const onToolResult = vi.fn();
   const onAuth = vi.fn().mockResolvedValue({ approved: true });
   const modeHolder = { mode: safetyMode };
+  const stopRequestedRef = overrides.stopRequestedRef ?? { current: false };
 
   if (overrides.hooks) {
     mocks.hooksListEnabled.mockReturnValue(overrides.hooks as unknown[]);
@@ -183,9 +186,10 @@ function makeTools(
     onToolResult,
     onAuthorizationRequired: onAuth,
     modeHolder,
+    stopRequestedRef,
   });
 
-  return { tools, onToolCall, onToolResult, onAuth };
+  return { tools, onToolCall, onToolResult, onAuth, stopRequestedRef };
 }
 
 // Helper: call a tool's execute function
@@ -841,14 +845,13 @@ describe('P1-4 Integration: Denial tracking (simulates loop.ts wiring)', () => {
     expect(tracker.lastDeniedCommand).toBe('systemctl stop nginx');
   });
 
-  it('triggers shouldNudgeAfterDenials at threshold (3)', () => {
+  it('triggers shouldNudgeAfterDenials at threshold (2)', () => {
     const tracker = createDenialTracker();
 
     recordDenial(tracker, 'exec', 'rejected 1', 'cmd1');
-    recordDenial(tracker, 'exec', 'rejected 2', 'cmd2');
     expect(shouldNudgeAfterDenials(tracker).shouldNudge).toBe(false);
 
-    recordDenial(tracker, 'exec', 'rejected 3', 'cmd3');
+    recordDenial(tracker, 'exec', 'rejected 2', 'cmd2');
     expect(shouldNudgeAfterDenials(tracker).shouldNudge).toBe(true);
   });
 
@@ -946,5 +949,138 @@ describe('get_session_usage tool', () => {
     // notifications should fire.
     expect(onAuth).not.toHaveBeenCalled();
     expect(onToolCall).not.toHaveBeenCalled();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase A/B: command editing in approval + rejection feedback
+// ════════════════════════════════════════════════════════════════════════
+describe('Phase A/B: command editing + rejection feedback', () => {
+  it('executes the user-edited command when the user edits and approves', async () => {
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator' });
+    onAuth.mockResolvedValue({ approved: true, editedCommand: 'echo bar > /tmp/y' });
+
+    await callTool(tools, 'exec', {
+      command: 'echo foo > /tmp/x',
+      description: 'write test',
+    });
+
+    // The EDITED command (not the original) reaches the SSH layer.
+    expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    expect(mocks.execCommand.mock.calls[0][1]).toBe('echo bar > /tmp/y');
+    // Audit records the executed command + editedByUser flag.
+    expect(auditStore.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'echo bar > /tmp/y',
+        editedByUser: true,
+      }),
+    );
+  });
+
+  it('does not execute when the edited command hits a blocked rule', async () => {
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator' });
+    onAuth.mockResolvedValue({ approved: true, editedCommand: 'rm -rf /' });
+
+    const result = (await callTool(tools, 'exec', {
+      command: 'echo foo > /tmp/x',
+      description: 'write test',
+    })) as { error?: string; blocked?: boolean };
+
+    expect(mocks.execCommand).not.toHaveBeenCalled();
+    expect(result.blocked).toBe(true);
+    expect(result.error).toContain('安全规则');
+    // Audit records the block with the BLOCKED commandType.
+    expect(auditStore.create).toHaveBeenCalledWith(
+      expect.objectContaining({ authorization: 'blocked', commandType: 'BLOCKED' }),
+    );
+  });
+
+  it('returns strong, instructional feedback to the model on a plain reject', async () => {
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator' });
+    onAuth.mockResolvedValue({ approved: false, reason: '用户拒绝' });
+
+    const result = (await callTool(tools, 'exec', {
+      command: 'echo foo > /tmp/x',
+      description: 'write test',
+    })) as { error?: string; blocked?: boolean };
+
+    expect(mocks.execCommand).not.toHaveBeenCalled();
+    expect(result.blocked).toBe(true);
+    // Model-facing error names the rejected command and directs to ask_user.
+    expect(result.error).toContain('echo foo > /tmp/x');
+    expect(result.error).toContain('ask_user');
+    expect(result.error).toContain('请勿重复尝试');
+  });
+
+  it('sets stopRequestedRef when the user rejects via "拒绝并停止"', async () => {
+    const stopRequestedRef = { current: false };
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator', stopRequestedRef });
+    onAuth.mockResolvedValue({
+      approved: false,
+      stopRequested: true,
+      reason: '用户拒绝并要求停止',
+    });
+
+    const result = (await callTool(tools, 'exec', {
+      command: 'echo foo > /tmp/x',
+      description: 'write test',
+    })) as { error?: string };
+
+    expect(stopRequestedRef.current).toBe(true);
+    expect(result.error).toContain('停止当前任务');
+  });
+
+  it('treats an unchanged edit (same as original) as a no-op', async () => {
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator' });
+    onAuth.mockResolvedValue({ approved: true, editedCommand: 'echo foo > /tmp/x' });
+
+    await callTool(tools, 'exec', {
+      command: 'echo foo > /tmp/x',
+      description: 'write test',
+    });
+
+    expect(mocks.execCommand).toHaveBeenCalledTimes(1);
+    expect(mocks.execCommand.mock.calls[0][1]).toBe('echo foo > /tmp/x');
+    // editedByUser should NOT be set when the edit equals the original.
+    expect(auditStore.create).toHaveBeenCalledWith(
+      expect.not.objectContaining({ editedByUser: true }),
+    );
+  });
+
+  it('informs the model when a command was user-edited (returns the executed command + notice)', async () => {
+    // Bug: the edited command executes, but the tool result returned to the
+    // model didn't mention the edit - so the model's subsequent steps
+    // referenced the ORIGINAL command. The result must surface the edit.
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator' });
+    onAuth.mockResolvedValue({ approved: true, editedCommand: 'mkdir /var/log/app2' });
+
+    const result = (await callTool(tools, 'exec', {
+      command: 'mkdir /var/log/app',
+      description: 'create dir',
+    })) as { stdout?: string; command?: string; userEdited?: boolean };
+
+    // The EDITED command ran (not the original).
+    expect(mocks.execCommand.mock.calls[0][1]).toBe('mkdir /var/log/app2');
+    // The model is informed via a stdout notice referencing the edited command.
+    expect(result.stdout).toContain('mkdir /var/log/app2');
+    expect(result.stdout).toContain('修改');
+    // Structured fields for the model.
+    expect(result.command).toBe('mkdir /var/log/app2');
+    expect(result.userEdited).toBe(true);
+  });
+
+  it('does not add edit notice/fields when the command was not edited', async () => {
+    const { tools, onAuth } = makeTools({ safetyMode: 'operator' });
+    onAuth.mockResolvedValue({ approved: true }); // no editedCommand
+
+    const result = (await callTool(tools, 'exec', {
+      command: 'echo foo > /tmp/x',
+      description: 'write',
+    })) as { stdout?: string; command?: string; userEdited?: boolean };
+
+    expect(result.userEdited).toBeUndefined();
+    expect(result.command).toBeUndefined();
+    // stdout is the raw mock output, no edit notice.
+    expect(result.stdout).not.toContain('修改');
   });
 });

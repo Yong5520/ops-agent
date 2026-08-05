@@ -41,7 +41,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 14;
+  const targetVersion = 15;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -266,6 +266,17 @@ function runMigrations(database: DB): void {
       'jump_target_auth',
       "TEXT NOT NULL DEFAULT 'bastion-managed'",
     );
+  }
+
+  if (currentVersion < 15) {
+    // Phase A: audit traceability for user-edited commands. When the user
+    // edits a command in the AuthDialog before approving, the audit row records
+    // the executed (edited) command AND this flag so reviewers can distinguish
+    // "model proposed X" from "user edited to X". Additive, defaults to 0
+    // (not edited). Not part of the hash chain (buildChainContent is unchanged)
+    // so existing chain integrity is unaffected. Idempotent.
+    logger.info(`Running migration v15: audit_logs.edited_by_user column`);
+    addColumnIfNotExists(database, 'audit_logs', 'edited_by_user', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   setUserVersion(database, targetVersion);

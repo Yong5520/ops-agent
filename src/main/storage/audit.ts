@@ -19,6 +19,7 @@ interface AuditRow {
   created_at: string;
   prev_hash: string;
   row_hash: string;
+  edited_by_user: number;
 }
 
 function rowToLog(row: AuditRow): AuditLog {
@@ -36,6 +37,7 @@ function rowToLog(row: AuditRow): AuditLog {
     exitCode: row.exit_code ?? undefined,
     durationMs: row.duration_ms ?? undefined,
     outputSummary: row.output_summary ?? undefined,
+    editedByUser: row.edited_by_user === 1,
     createdAt: row.created_at,
   };
 }
@@ -110,10 +112,12 @@ export const auditStore = {
         `
       INSERT INTO audit_logs (session_id, host_id, host_name, host_ip, safety_mode,
                               command_type, command, description, authorization,
-                              exit_code, duration_ms, output_summary, prev_hash, row_hash)
+                              exit_code, duration_ms, output_summary, prev_hash, row_hash,
+                              edited_by_user)
       VALUES (@sessionId, @hostId, @hostName, @hostIp, @safetyMode,
               @commandType, @command, @description, @authorization,
-              @exitCode, @durationMs, @outputSummary, @prevHash, @rowHash)
+              @exitCode, @durationMs, @outputSummary, @prevHash, @rowHash,
+              @editedByUser)
       RETURNING *
     `,
       )
@@ -132,6 +136,7 @@ export const auditStore = {
         outputSummary: payload.outputSummary ?? null,
         prevHash,
         rowHash,
+        editedByUser: payload.editedByUser ? 1 : 0,
       }) as AuditRow;
     return rowToLog(row);
   },

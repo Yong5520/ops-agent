@@ -1,6 +1,6 @@
 {
   "name": "ops-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI 驱动的 Linux 运维 Agent 桌面客户端",
   "main": "out/main/index.js",
   "author": "OpsAgent",

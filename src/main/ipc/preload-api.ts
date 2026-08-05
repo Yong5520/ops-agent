@@ -87,6 +87,10 @@ export interface AgentToolResultEvent {
   durationMs?: number;
   blockedReason?: string;
   authorization: 'auto' | 'approved' | 'rejected' | 'blocked';
+  // The command that was rejected/blocked (mirrors ToolCallResult.command).
+  command?: string;
+  // True when the user rejected via "拒绝并停止" (mirrors ToolCallResult.stopRequested).
+  stopRequested?: boolean;
   partial?: boolean;
 }
 
@@ -108,6 +112,10 @@ export interface AgentAuthorizationResponse {
   approved: boolean;
   reason?: string;
   backup?: boolean;
+  // User-edited command (when the user modified the command before approving).
+  editedCommand?: string;
+  // True when the user clicked "拒绝并停止" (reject and stop the task).
+  stopRequested?: boolean;
 }
 
 export interface AgentCompleteEvent {

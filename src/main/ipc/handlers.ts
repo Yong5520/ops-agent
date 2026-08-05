@@ -458,6 +458,8 @@ export function registerIpcHandlers(win: BrowserWindow): void {
           approved: response.approved,
           reason: response.reason,
           backup: response.backup,
+          editedCommand: response.editedCommand,
+          stopRequested: response.stopRequested,
         });
       } else {
         logger.warn(

@@ -29,6 +29,11 @@ export interface AgentLoopParams {
   attachments?: AttachmentInput[];
   // When aborted, the loop stops as soon as the current stream step yields.
   abortSignal?: AbortSignal;
+  // Phase B: optional shared ref so callers/tests can observe or trigger the
+  // "拒绝并停止" wind-down path. When preExec sets current=true (user clicked
+  // reject-and-stop), the loop breaks and runs a wind-down turn. Defaults to
+  // an internal ref when not provided.
+  stopRequestedRef?: StopRequestedRef;
   // Streaming callbacks - invoked from the main process to drive the UI.
   onTextStream: (text: string) => void;
   // Thinking/reasoning stream - emits structured events so the UI can render
@@ -81,6 +86,13 @@ export interface ToolCallResult {
   durationMs?: number;
   blockedReason?: string;
   authorization: AuthorizationStatus;
+  // The command that was rejected/blocked. Populated on rejected/blocked
+  // results so the loop's denial tracker can reference the actual command
+  // (without this, the nudge message can't tell the model what was rejected).
+  command?: string;
+  // True when the user rejected via "拒绝并停止" - signals the loop to break
+  // and run a wind-down turn instead of continuing to propose commands.
+  stopRequested?: boolean;
   // When true, this is an incremental chunk during streaming output -
   // the UI should append to the existing card's output rather than replace.
   partial?: boolean;
@@ -110,6 +122,14 @@ export interface AuthorizationResponse {
   // When true, the user requested a backup before execution.
   // The tool should create backups of backupPaths before proceeding.
   backup?: boolean;
+  // When set, the user edited the command in the AuthDialog before approving.
+  // preExec re-validates it (sanitize + security re-check); if it passes, this
+  // replaces the original command for execution. If it hits a blocked rule,
+  // the command is blocked regardless of the approval.
+  editedCommand?: string;
+  // When true (with approved=false), the user clicked "拒绝并停止" - reject this
+  // command AND stop the task. The loop breaks and runs a wind-down turn.
+  stopRequested?: boolean;
 }
 
 // Internal record for audit logging.
@@ -127,6 +147,9 @@ export interface ToolExecutionRecord {
   durationMs?: number;
   outputSummary?: string;
   blockedReason?: string;
+  // True when the executed command was edited by the user in the AuthDialog
+  // (differs from what the model proposed). For audit traceability.
+  editedByUser?: boolean;
 }
 
 // Streaming event for a thinking/reasoning block. The renderer reconstructs
@@ -144,6 +167,13 @@ export interface ThinkingStreamEvent {
   // into this thinking block. Happens for stray closers (qwen3.5-27b pattern
   // where the opening delimiter never reaches the content stream).
   absorbPrecedingText?: number;
+}
+
+// Mutable ref shared between the agent loop and the tools closure (Phase B).
+// When the user clicks "拒绝并停止", preExec sets current=true; the loop's
+// stream consumer checks this ref and breaks, then runs a wind-down turn.
+export interface StopRequestedRef {
+  current: boolean;
 }
 
 // Context for a single agent loop invocation.

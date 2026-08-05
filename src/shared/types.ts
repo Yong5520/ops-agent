@@ -150,6 +150,9 @@ export interface AuditLog {
   exitCode?: number;
   durationMs?: number;
   outputSummary?: string;
+  // Phase A: true when the executed command was edited by the user in the
+  // AuthDialog (differs from what the model proposed).
+  editedByUser?: boolean;
   createdAt: string;
 }
 
@@ -166,6 +169,7 @@ export interface AuditLogInput {
   exitCode?: number;
   durationMs?: number;
   outputSummary?: string;
+  editedByUser?: boolean;
 }
 
 export interface AuditFilter {

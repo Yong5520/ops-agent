@@ -16,6 +16,7 @@ import type {
   AuthorizationRequest,
   AuthorizationResponse,
   ToolExecutionRecord,
+  StopRequestedRef,
 } from './types.js';
 import { createTodoWriteTool } from './tools/todo-write.js';
 import { createUpdateMemoryTool } from './tools/update-memory.js';
@@ -55,6 +56,8 @@ import {
   buildDiskAnalysisCommand,
   buildNetworkConnectionsCommand,
 } from './ops-commands.js';
+import { revalidateEditedCommand, buildEditNotice } from './command-edit.js';
+import { buildRejectionFeedback } from './rejection-feedback.js';
 
 // Tool factory — creates the tools object for a single agent loop invocation.
 // Tools close over the session context and streaming callbacks so they can:
@@ -77,6 +80,9 @@ export interface ToolFactoryDeps {
   // AskUserQuestion (P1-4): lets the model ask the user clarifying questions.
   onAskUser?: AskUserCallback;
   modeHolder: ModeHolder;
+  // Phase B: shared ref so preExec can signal "user clicked 拒绝并停止" to the
+  // loop. Optional with a default so existing callers/tests don't break.
+  stopRequestedRef?: StopRequestedRef;
 }
 
 export function createTools(deps: ToolFactoryDeps) {
@@ -92,6 +98,8 @@ export function createTools(deps: ToolFactoryDeps) {
     onAskUser,
     modeHolder,
   } = deps;
+  // Default ref when not provided (backward compat for tests/older callers).
+  const stopRequestedRef: StopRequestedRef = deps.stopRequestedRef ?? { current: false };
   const securityConfig = getEffectiveConfig(safetyMode);
 
   // Load enabled hooks once per agent loop invocation. Hooks are evaluated
@@ -168,6 +176,15 @@ export function createTools(deps: ToolFactoryDeps) {
     authorization: 'auto' | 'approved' | 'rejected' | 'blocked';
     backup?: boolean;
     modifiedCommand?: string;
+    // Phase A: true when the executed command was user-edited in the AuthDialog.
+    editedByUser?: boolean;
+    // Phase B: true when the user rejected via "拒绝并停止". Signals the loop
+    // (via stopRequestedRef) to break and run a wind-down turn.
+    stopRequested?: boolean;
+    // Phase B: model-facing error message (long, instructional). When set,
+    // tools use this instead of `reason` for the tool result returned to the
+    // model, so the model sees explicit "don't retry / use ask_user" guidance.
+    modelError?: string;
   }> {
     // 1. Security rule check (always applies, all modes)
     const secResult = checkCommandSecurity(command, host.id, securityConfig);
@@ -294,26 +311,78 @@ export function createTools(deps: ToolFactoryDeps) {
       };
       const response = await onAuthorizationRequired(request);
       if (!response.approved) {
+        // Phase B: "拒绝并停止" sets the shared ref so the loop breaks and
+        // runs a wind-down turn instead of continuing to propose commands.
+        if (response.stopRequested) {
+          stopRequestedRef.current = true;
+        }
         onToolResult({
           toolCallId,
           toolName,
           success: false,
           blockedReason: response.reason ?? 'User rejected',
           authorization: 'rejected',
+          // Carry the command + stopRequested so the loop's denial tracker can
+          // reference the rejected command and detect a stop request.
+          command,
+          stopRequested: response.stopRequested,
         });
         return {
           proceed: false,
           reason: response.reason ?? 'User rejected',
           commandType,
           authorization: 'rejected',
+          stopRequested: response.stopRequested,
+          // Strong, instructional feedback for the model (names the rejected
+          // command, says don't retry, use ask_user, and stop if requested).
+          modelError: buildRejectionFeedback({
+            command,
+            userReason: response.reason,
+            stopRequested: response.stopRequested,
+          }),
         };
+      }
+      // Phase A: re-validate a user-edited command. The edit is user-supplied
+      // at approval time, so it bypassed the security pipeline - re-run
+      // sanitize + checkCommandSecurity. A blocked-rule hit blocks regardless
+      // of the approval (defense-in-depth).
+      const edit = revalidateEditedCommand(
+        response.editedCommand,
+        command,
+        host.id,
+        securityConfig,
+      );
+      let effectiveModifiedCommand = modifiedCommand;
+      let effectiveCommandType = commandType;
+      let editedByUser = false;
+      if (edit.changed) {
+        if (edit.blocked) {
+          onToolResult({
+            toolCallId,
+            toolName,
+            success: false,
+            blockedReason: edit.reason,
+            authorization: 'blocked',
+            command,
+          });
+          return {
+            proceed: false,
+            reason: edit.reason,
+            commandType: 'BLOCKED',
+            authorization: 'blocked',
+          };
+        }
+        effectiveModifiedCommand = edit.modifiedCommand;
+        effectiveCommandType = edit.commandType ?? commandType;
+        editedByUser = true;
       }
       return {
         proceed: true,
-        commandType,
+        commandType: effectiveCommandType,
         authorization: 'approved',
         backup: response.backup,
-        modifiedCommand,
+        modifiedCommand: effectiveModifiedCommand,
+        editedByUser,
       };
     }
 
@@ -357,6 +426,7 @@ export function createTools(deps: ToolFactoryDeps) {
         exitCode: rec.exitCode,
         durationMs: rec.durationMs,
         outputSummary: rec.outputSummary ?? rec.blockedReason,
+        editedByUser: rec.editedByUser,
       });
     } catch (err) {
       logger.error('Failed to write audit log:', err);
@@ -547,7 +617,9 @@ export function createTools(deps: ToolFactoryDeps) {
             authorization: pre.authorization,
             blockedReason: pre.reason,
           });
-          return { error: pre.reason, blocked: true };
+          // Use the model-facing feedback (buildRejectionFeedback) when present
+          // so the model sees explicit guidance instead of a bare reason.
+          return { error: pre.modelError ?? pre.reason, blocked: true };
         }
 
         const effectiveCommand = pre.modifiedCommand ?? sanitized;
@@ -617,12 +689,17 @@ export function createTools(deps: ToolFactoryDeps) {
           const effectiveStdout = postResult.additionalContext
             ? `${result.stdout}\n\n[Hook Context]\n${postResult.additionalContext}`
             : result.stdout;
+          // Phase A: when the user edited the command, prepend a notice so the
+          // model knows the command that actually ran differs from what it
+          // proposed (otherwise subsequent steps reference the original).
+          const editNotice = pre.editedByUser ? buildEditNotice(effectiveCommand) : '';
+          const modelStdout = editNotice + effectiveStdout;
 
           onToolResult({
             toolCallId,
             toolName: 'exec',
             success,
-            stdout: effectiveStdout,
+            stdout: modelStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -642,11 +719,12 @@ export function createTools(deps: ToolFactoryDeps) {
             exitCode: result.exitCode ?? undefined,
             durationMs: result.durationMs,
             outputSummary: truncateOutput(result.stdout || result.stderr),
+            editedByUser: pre.editedByUser,
           });
 
           // P1-1: Large result persistence
           if (shouldPersist(result.stdout, result.stderr)) {
-            return persistToolResult(context.sessionId, toolCallId, {
+            const persisted = persistToolResult(context.sessionId, toolCallId, {
               stdout: result.stdout,
               stderr: result.stderr,
               exitCode: result.exitCode,
@@ -654,13 +732,19 @@ export function createTools(deps: ToolFactoryDeps) {
               hostName: host.name,
               toolName: 'exec',
             });
+            return {
+              ...persisted,
+              preview: editNotice + persisted.preview,
+              ...(pre.editedByUser ? { command: effectiveCommand, userEdited: true } : {}),
+            };
           }
 
           return {
-            stdout: effectiveStdout,
+            stdout: modelStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
+            ...(pre.editedByUser ? { command: effectiveCommand, userEdited: true } : {}),
           };
         } catch (err) {
           const errMsg = formatSshError(err as Error, host.name);
@@ -684,12 +768,13 @@ export function createTools(deps: ToolFactoryDeps) {
             hostName: host.name,
             hostIp: host.host,
             toolName: 'exec',
-            command: sanitized,
+            command: effectiveCommand,
             description,
             commandType: pre.commandType,
             authorization: pre.authorization,
             exitCode: -1,
             blockedReason: errMsg,
+            editedByUser: pre.editedByUser,
           });
           return { error: errMsg, blocked: false };
         } finally {
@@ -1034,7 +1119,7 @@ export function createTools(deps: ToolFactoryDeps) {
             authorization: pre.authorization,
             blockedReason: pre.reason,
           });
-          return { error: pre.reason, blocked: true };
+          return { error: pre.modelError ?? pre.reason, blocked: true };
         }
 
         const effectiveCommand = pre.modifiedCommand ?? sanitized;
@@ -1098,12 +1183,15 @@ export function createTools(deps: ToolFactoryDeps) {
           const effectiveStdout = postResult.additionalContext
             ? `${result.stdout}\n\n[Hook Context]\n${postResult.additionalContext}`
             : result.stdout;
+          // Phase A: surface user edits to the model (see exec tool for rationale).
+          const editNotice = pre.editedByUser ? buildEditNotice(effectiveCommand) : '';
+          const modelStdout = editNotice + effectiveStdout;
 
           onToolResult({
             toolCallId,
             toolName: 'sudo_exec',
             success,
-            stdout: effectiveStdout,
+            stdout: modelStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -1123,11 +1211,12 @@ export function createTools(deps: ToolFactoryDeps) {
             exitCode: result.exitCode ?? undefined,
             durationMs: result.durationMs,
             outputSummary: truncateOutput(result.stdout || result.stderr),
+            editedByUser: pre.editedByUser,
           });
 
           // P1-1: Large result persistence
           if (shouldPersist(result.stdout, result.stderr)) {
-            return persistToolResult(context.sessionId, toolCallId, {
+            const persisted = persistToolResult(context.sessionId, toolCallId, {
               stdout: result.stdout,
               stderr: result.stderr,
               exitCode: result.exitCode,
@@ -1135,13 +1224,19 @@ export function createTools(deps: ToolFactoryDeps) {
               hostName: host.name,
               toolName: 'sudo_exec',
             });
+            return {
+              ...persisted,
+              preview: editNotice + persisted.preview,
+              ...(pre.editedByUser ? { command: effectiveCommand, userEdited: true } : {}),
+            };
           }
 
           return {
-            stdout: effectiveStdout,
+            stdout: modelStdout,
             stderr: result.stderr,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
+            ...(pre.editedByUser ? { command: effectiveCommand, userEdited: true } : {}),
           };
         } catch (err) {
           const errMsg = formatSshError(err as Error, host.name);
@@ -1165,12 +1260,13 @@ export function createTools(deps: ToolFactoryDeps) {
             hostName: host.name,
             hostIp: host.host,
             toolName: 'sudo_exec',
-            command: sanitized,
+            command: effectiveCommand,
             description,
             commandType: 'SUDO',
             authorization: pre.authorization,
             exitCode: -1,
             blockedReason: errMsg,
+            editedByUser: pre.editedByUser,
           });
           return { error: errMsg, blocked: false };
         } finally {
@@ -1285,7 +1381,7 @@ export function createTools(deps: ToolFactoryDeps) {
             authorization: pre.authorization,
             blockedReason: pre.reason,
           });
-          return { error: pre.reason, blocked: true };
+          return { error: pre.modelError ?? pre.reason, blocked: true };
         }
 
         const release = await guard.acquireWrite(host.id);
@@ -1422,7 +1518,7 @@ export function createTools(deps: ToolFactoryDeps) {
             authorization: pre.authorization,
             blockedReason: pre.reason,
           });
-          return { error: pre.reason, blocked: true };
+          return { error: pre.modelError ?? pre.reason, blocked: true };
         }
 
         const release = await guard.acquireWrite(host.id);

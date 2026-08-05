@@ -34,13 +34,14 @@ import {
   recordApproval,
   shouldNudgeAfterDenials,
 } from './denial-tracking.js';
+import { WIND_DOWN_DIRECTIVE } from './rejection-feedback.js';
 import type { ModeHolder } from './tools/exit-plan-mode.js';
 import { hasSubstantiveText, EMPTY_RESPONSE_MARKER } from './message-text.js';
 import { hostsStore } from '../storage/hosts.js';
 import { gatherMultipleHostFacts } from './facts.js';
 import { attachmentsStore } from '../storage/attachments.js';
 import { logger } from '../utils/logger.js';
-import type { AgentLoopParams, SessionContext, ToolCallResult } from './types.js';
+import type { AgentLoopParams, SessionContext, ToolCallResult, StopRequestedRef } from './types.js';
 import type { ThinkingBlock, TodoItem } from '../../shared/types.js';
 
 // Agent main loop - the core of the application.
@@ -203,13 +204,24 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     // without recreating the tools object. preExec reads from modeHolder.mode.
     const modeHolder: ModeHolder = { mode: safetyMode };
 
+    // Phase B: shared ref so preExec can signal "user clicked 拒绝并停止" to the
+    // loop. When set, the stream consumer breaks and a wind-down turn runs so
+    // the agent summarizes progress and asks the user how to proceed (instead
+    // of continuing to propose commands that need approval). Injectable via
+    // params for testability; defaults to an internal ref.
+    const stopRequestedRef: StopRequestedRef = params.stopRequestedRef ?? { current: false };
+    // Guards the wind-down turn so it runs at most once per loop invocation.
+    let windDownDone = false;
+
     // Denial tracker (P1-4): wraps onToolResult to detect when the user
     // repeatedly rejects authorizations. When the threshold is hit, a nudge
     // is injected suggesting the model use ask_user to clarify intent.
     const denialTracker = createDenialTracker();
     const wrappedOnToolResult = (result: ToolCallResult) => {
       if (result.authorization === 'rejected' || result.authorization === 'blocked') {
-        recordDenial(denialTracker, result.toolName, result.blockedReason);
+        // Pass result.command so the nudge can reference the rejected command
+        // (previously omitted - lastDeniedCommand was always undefined).
+        recordDenial(denialTracker, result.toolName, result.blockedReason, result.command);
       } else if (result.success) {
         recordApproval(denialTracker);
       }
@@ -227,6 +239,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       onModeChange: params.onModeChange,
       onAskUser: params.onAskUser,
       modeHolder,
+      stopRequestedRef,
     });
 
     logger.info(
@@ -379,6 +392,13 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
             // message is appended after the loop breaks (below).
             if (repetitionRef.current) {
               logger.info(`[Agent] Breaking stream: repetition detected`);
+              break;
+            }
+            // Phase B: user clicked "拒绝并停止" during an authorization. Stop
+            // consuming so the model doesn't keep proposing commands; a
+            // wind-down turn runs after the break (post-stream below).
+            if (stopRequestedRef.current) {
+              logger.info(`[Agent] Breaking stream: user requested stop (拒绝并停止)`);
               break;
             }
             switch (part.type) {
@@ -591,6 +611,41 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
         params.onTextStream(note);
         fullText += roundText;
         stalled = false;
+        continue;
+      }
+
+      // Phase B: wind-down after "拒绝并停止". The stream was broken when the
+      // user rejected a command and asked to stop. Either (a) the wind-down
+      // turn already ran -> exit and complete, or (b) run the wind-down turn
+      // (one more streamText with a directive to summarize + ask_user).
+      if (windDownDone) {
+        fullText += roundText;
+        stalled = false;
+        continue;
+      }
+      if (stopRequestedRef.current) {
+        windDownDone = true;
+        fullText += roundText;
+        logger.info(`[Agent] User requested stop; running wind-down turn`);
+        // Fold the interrupted round's messages in if available. result.response
+        // may reject if the stream was broken mid-step - fall back to existing
+        // messages (prior rounds' context is already there).
+        try {
+          const wdResponse = await result.response;
+          messages = [...messages, ...wdResponse.messages];
+        } catch {
+          logger.warn(
+            `[Agent] Interrupted response unavailable for wind-down; using existing messages`,
+          );
+        }
+        messages = [...messages, { role: 'user' as const, content: WIND_DOWN_DIRECTIVE }];
+        fullText += '\n\n';
+        params.onTextStream('\n\n');
+        // Reset so the wind-down round's for-await isn't immediately broken by
+        // the stop check above. If the model disobeys and triggers another
+        // reject-and-stop, windDownDone is already true -> exit after the round.
+        stopRequestedRef.current = false;
+        stalled = true;
         continue;
       }
 

@@ -88,6 +88,12 @@ interface AgentStore {
     approved: boolean,
     reason?: string,
     backup?: boolean,
+    // User-edited command (Phase A): when set, replaces the model's command
+    // after security re-validation. Only meaningful for exec/sudo_exec.
+    editedCommand?: string,
+    // Phase B: when true (with approved=false), the user clicked "拒绝并停止" -
+    // reject this command and stop the task (loop breaks + wind-down turn).
+    stopRequested?: boolean,
   ) => Promise<void>;
   reset: () => void;
   clearError: () => void;
@@ -464,8 +470,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
 
-  respondAuth: async (toolCallId, approved, reason, backup) => {
-    await window.opsAgent.agent.respondAuthorization({ toolCallId, approved, reason, backup });
+  respondAuth: async (toolCallId, approved, reason, backup, editedCommand, stopRequested) => {
+    await window.opsAgent.agent.respondAuthorization({
+      toolCallId,
+      approved,
+      reason,
+      backup,
+      editedCommand,
+      stopRequested,
+    });
     // Remove from pending list
     set({ pendingAuths: get().pendingAuths.filter((a) => a.toolCallId !== toolCallId) });
     // Update tool card status

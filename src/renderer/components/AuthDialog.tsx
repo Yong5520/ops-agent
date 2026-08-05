@@ -81,14 +81,50 @@ export function AuthDialog() {
     setBackupChecked(true);
   }, [currentIndex]);
 
+  // Phase A: command editing. Only exec/sudo_exec carry a real shell command
+  // the user can meaningfully edit before approving; other tools (write_file,
+  // rollback) show a synthetic command string and stay read-only.
+  const editable = auth?.toolName === 'exec' || auth?.toolName === 'sudo_exec';
+  const [editedCommand, setEditedCommand] = useState('');
+  // Phase B: optional reject reason, fed to the model as feedback.
+  const [rejectReason, setRejectReason] = useState('');
+
+  // Reset edit/reason state when the displayed auth item changes. Both
+  // toolCallId and command change together when the item swaps; listing both
+  // satisfies exhaustive-deps. The user's in-progress edits touch
+  // editedCommand (local state), NOT auth.command, so this never clobbers an
+  // active edit mid-keystroke.
+  useEffect(() => {
+    setEditedCommand(auth?.command ?? '');
+    setRejectReason('');
+  }, [auth?.toolCallId, auth?.command]);
+
   // Single item actions
   const approve = useCallback(() => {
-    if (auth) respondAuth(auth.toolCallId, true, undefined, backupChecked && !!auth.backupPaths);
-  }, [auth, respondAuth, backupChecked]);
+    if (!auth) return;
+    // Phase A: send the user-edited command only when it actually differs
+    // from the original (trim-normalized). preExec re-validates it against
+    // security rules; a blocked-rule hit blocks execution regardless.
+    const edited =
+      editable && editedCommand.trim() && editedCommand !== auth.command
+        ? editedCommand
+        : undefined;
+    respondAuth(auth.toolCallId, true, undefined, backupChecked && !!auth.backupPaths, edited);
+  }, [auth, respondAuth, backupChecked, editable, editedCommand]);
 
   const reject = useCallback(() => {
-    if (auth) respondAuth(auth.toolCallId, false, '用户拒绝');
-  }, [auth, respondAuth]);
+    if (!auth) return;
+    const reason = rejectReason.trim() || '用户拒绝';
+    respondAuth(auth.toolCallId, false, reason);
+  }, [auth, respondAuth, rejectReason]);
+
+  // Phase B: reject this command AND stop the task. The loop breaks and runs a
+  // wind-down turn so the agent summarizes + asks the user how to proceed.
+  const rejectAndStop = useCallback(() => {
+    if (!auth) return;
+    const reason = rejectReason.trim() || '用户拒绝并要求停止';
+    respondAuth(auth.toolCallId, false, reason, undefined, undefined, true);
+  }, [auth, respondAuth, rejectReason]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -103,7 +139,11 @@ export function AuthDialog() {
           approve();
           break;
         case 'n':
-          reject();
+          if (e.shiftKey) {
+            rejectAndStop();
+          } else {
+            reject();
+          }
           break;
         case 'a':
           if (e.shiftKey) {
@@ -129,7 +169,17 @@ export function AuthDialog() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [auth, approve, reject, approveAll, approveAllOnHost, rejectAll, pendingAuths.length, showSudoConfirm]);
+  }, [
+    auth,
+    approve,
+    reject,
+    rejectAndStop,
+    approveAll,
+    approveAllOnHost,
+    rejectAll,
+    pendingAuths.length,
+    showSudoConfirm,
+  ]);
 
   if (!auth) return null;
 
@@ -239,8 +289,36 @@ export function AuthDialog() {
           </div>
 
           <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2">
-            <div className="mb-1 text-xs text-zinc-500">计划执行的命令：</div>
-            <code className="block text-sm text-zinc-200 font-mono break-all">{auth.command}</code>
+            <div className="mb-1 flex items-center gap-2 text-xs text-zinc-500">
+              <span>计划执行的命令：</span>
+              {editable && editedCommand !== auth.command && (
+                <span className="rounded bg-amber-900/60 px-1.5 py-0.5 text-[10px] text-amber-300">
+                  已修改
+                </span>
+              )}
+              {editable && editedCommand !== auth.command && (
+                <button
+                  type="button"
+                  onClick={() => setEditedCommand(auth.command)}
+                  className="ml-auto text-[10px] text-zinc-400 underline hover:text-zinc-200"
+                >
+                  恢复原命令
+                </button>
+              )}
+            </div>
+            {editable ? (
+              <textarea
+                value={editedCommand}
+                onChange={(e) => setEditedCommand(e.target.value)}
+                rows={Math.min(8, Math.max(2, Math.ceil((editedCommand.length || 1) / 80)))}
+                className="block w-full resize-y rounded bg-zinc-900 px-2 py-1.5 font-mono text-sm text-zinc-200 outline-none focus:ring-1 focus:ring-blue-500"
+                spellCheck={false}
+              />
+            ) : (
+              <code className="block text-sm text-zinc-200 font-mono break-all">
+                {auth.command}
+              </code>
+            )}
           </div>
 
           {auth.description && (
@@ -269,6 +347,16 @@ export function AuthDialog() {
               </span>
             </label>
           )}
+
+          {/* Phase B: optional reject reason - fed to the model as feedback so
+              it knows WHY the user rejected (used by plain reject and 拒绝并停止). */}
+          <input
+            type="text"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            placeholder="拒绝原因（可选，会反馈给 AI）"
+            className="mt-2 w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none focus:ring-1 focus:ring-blue-500"
+          />
         </div>
 
         {/* Actions */}
@@ -296,6 +384,10 @@ export function AuthDialog() {
               拒绝
               <kbd className="ml-1 text-[10px] text-red-300/60">N</kbd>
             </Button>
+            <Button variant="danger" onClick={rejectAndStop}>
+              拒绝并停止
+              <kbd className="ml-1 text-[10px] text-red-300/60">Shift+N</kbd>
+            </Button>
             {pendingAuths.length > 1 && (
               <Button variant="secondary" onClick={approveAll}>
                 批准全部{hasSudo ? ' (跳过 SUDO)' : ''}
@@ -312,8 +404,9 @@ export function AuthDialog() {
         {/* Keyboard hints */}
         <div className="border-t border-zinc-800/50 bg-zinc-950/30 px-5 py-1.5 text-[10px] text-zinc-600">
           快捷键：<kbd className="text-zinc-500">y</kbd> 批准 ·{' '}
-          <kbd className="text-zinc-500">n</kbd> 拒绝 · <kbd className="text-zinc-500">a</kbd>{' '}
-          同主机 · <kbd className="text-zinc-500">Shift+A</kbd> 批准全部 ·{' '}
+          <kbd className="text-zinc-500">n</kbd> 拒绝 · <kbd className="text-zinc-500">Shift+N</kbd>{' '}
+          拒绝并停止 · <kbd className="text-zinc-500">a</kbd> 同主机 ·{' '}
+          <kbd className="text-zinc-500">Shift+A</kbd> 批准全部 ·{' '}
           <kbd className="text-zinc-500">j/k</kbd> 导航 · <kbd className="text-zinc-500">Esc</kbd>{' '}
           全拒
         </div>

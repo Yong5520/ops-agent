@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   output_summary  TEXT,
   prev_hash       TEXT NOT NULL DEFAULT '',
   row_hash        TEXT NOT NULL DEFAULT '',
+  edited_by_user  INTEGER NOT NULL DEFAULT 0,
   created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_host ON audit_logs(host_name, created_at);
