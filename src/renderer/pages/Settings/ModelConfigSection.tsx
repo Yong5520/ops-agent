@@ -9,6 +9,12 @@ import type {
   ModelProviderInput,
   ModelProviderType,
 } from '../../../shared/types.js';
+import {
+  MODEL_VENDOR_PRESETS,
+  getVendorPreset,
+  resolveVendorFromEndpoint,
+  CUSTOM_VENDOR_ID,
+} from './model-vendors.js';
 
 const PROVIDER_TYPES: Array<{ value: ModelProviderType; label: string }> = [
   { value: 'anthropic', label: 'Anthropic (Claude)' },
@@ -104,6 +110,11 @@ function ModelForm({
 }) {
   const [name, setName] = useState(editing?.name ?? '');
   const [type, setType] = useState<ModelProviderType>(editing?.type ?? 'anthropic');
+  // V3-10: vendor drives type + endpoint auto-fill. Resolved from the stored
+  // endpoint on edit; 'anthropic' is the default for a new provider.
+  const [vendorId, setVendorId] = useState(
+    editing ? resolveVendorFromEndpoint(editing.endpoint) : 'anthropic',
+  );
   const [endpoint, setEndpoint] = useState(editing?.endpoint ?? '');
   const [apiKey, setApiKey] = useState('');
   const [modelName, setModelName] = useState(editing?.modelName ?? '');
@@ -128,6 +139,18 @@ function ModelForm({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // V3-10: selecting a vendor auto-fills type + endpoint. The endpoint stays
+  // editable afterwards (some vendors have workspace-specific URLs). For
+  // 'custom' we leave type/endpoint alone so the user picks freely.
+  const handleVendorChange = (id: string): void => {
+    setVendorId(id);
+    if (id === CUSTOM_VENDOR_ID) return;
+    const preset = getVendorPreset(id);
+    if (!preset) return;
+    setType(preset.type);
+    setEndpoint(preset.defaultEndpoint);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
@@ -135,6 +158,13 @@ function ModelForm({
     // Validate: new models require apiKey
     if (!editing && !apiKey.trim()) {
       setFormError('请填写 API Key');
+      return;
+    }
+    // V3-10: endpoint is required. Concrete vendors pre-fill it; 'custom'
+    // requires the user to type one (openai-compatible needs a real URL).
+    const finalEndpoint = endpoint.trim() || getVendorPreset(vendorId)?.defaultEndpoint || '';
+    if (!finalEndpoint) {
+      setFormError('请选择模型厂商或填写 API 端点');
       return;
     }
 
@@ -145,7 +175,7 @@ function ModelForm({
       const input: ModelProviderInput = {
         name: name.trim(),
         type,
-        endpoint: endpoint.trim() || getDefaultEndpoint(type),
+        endpoint: finalEndpoint,
         apiKey: apiKey.trim() || undefined!,
         modelName: modelName.trim(),
         contextWindow: contextWindow.trim() ? Number(contextWindow.trim()) : undefined,
@@ -208,6 +238,17 @@ function ModelForm({
                 required
               />
             </Field>
+            <Field label="模型厂商">
+              <Select value={vendorId} onChange={(e) => handleVendorChange(e.target.value)}>
+                {MODEL_VENDOR_PRESETS.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          {vendorId === CUSTOM_VENDOR_ID && (
             <Field label="供应商类型">
               <Select value={type} onChange={(e) => setType(e.target.value as ModelProviderType)}>
                 {PROVIDER_TYPES.map((t) => (
@@ -217,13 +258,25 @@ function ModelForm({
                 ))}
               </Select>
             </Field>
-          </div>
-          <Field label="API 端点（可选，留空使用默认）">
+          )}
+          <Field label="API 端点（选择厂商后自动填写，可手动修改）">
             <Input
               value={endpoint}
               onChange={(e) => setEndpoint(e.target.value)}
-              placeholder={getDefaultEndpoint(type)}
+              placeholder={
+                getVendorPreset(vendorId)?.defaultEndpoint || 'https://api.example.com/v1'
+              }
             />
+            {getVendorPreset(vendorId)?.docUrl && (
+              <a
+                href={getVendorPreset(vendorId)!.docUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1 inline-block text-xs text-zinc-400 hover:text-zinc-200"
+              >
+                获取 API Key ↗
+              </a>
+            )}
           </Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="API Key">
@@ -239,7 +292,7 @@ function ModelForm({
               <Input
                 value={modelName}
                 onChange={(e) => setModelName(e.target.value)}
-                placeholder="claude-sonnet-4-6"
+                placeholder={getVendorPreset(vendorId)?.defaultModel ?? 'model-name'}
                 required
               />
             </Field>
@@ -303,7 +356,7 @@ function ModelForm({
             buildInput={() => ({
               name: name.trim(),
               type,
-              endpoint: endpoint.trim() || getDefaultEndpoint(type),
+              endpoint: endpoint.trim() || getVendorPreset(vendorId)?.defaultEndpoint || '',
               apiKey: apiKey.trim() || undefined!,
               modelName: modelName.trim(),
               contextWindow: contextWindow.trim() ? Number(contextWindow.trim()) : undefined,
@@ -326,17 +379,6 @@ function ModelForm({
       </form>
     </div>
   );
-}
-
-function getDefaultEndpoint(type: ModelProviderType): string {
-  switch (type) {
-    case 'anthropic':
-      return 'https://api.anthropic.com/v1';
-    case 'openai':
-      return 'https://api.openai.com/v1';
-    case 'openai-compatible':
-      return 'https://ark.cn-beijing.volces.com/api/v3';
-  }
 }
 
 // ── Test connection components ──────────────────────────────────────────

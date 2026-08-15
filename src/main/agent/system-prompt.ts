@@ -30,6 +30,11 @@ export interface SystemPromptParams {
   // a "当前任务列表进度" section is injected so a resumed session continues
   // from the last completed step instead of re-planning from scratch.
   todos?: TodoItem[];
+  // V3-10: whether the user's latest message explicitly requests continuing
+  // an incomplete task list (computed in loop.ts via isContinuationRequest).
+  // When false/undefined, the resume directive is softened so a question does
+  // not auto-trigger "continue executing" (the 2026-08-11 nginx incident).
+  userRequestsContinuation?: boolean;
 }
 
 // Split system prompt for prompt-cache optimization.
@@ -64,15 +69,22 @@ export function buildSystemPrompt(params: SystemPromptParams): SystemPromptParts
 
   if (selectedHosts.length > 0) {
     const hostList = selectedHosts
-      .map((h) => `  - ${h.name} (${h.host}:${h.port}) [${h.groupName}]`)
+      .map((h) => {
+        const conn = h.connectionType === 'serial' ? ' 串口' : '';
+        return `  - ${h.name} (${h.host}:${h.port})${conn} [${h.groupName}]`;
+      })
       .join('\n');
+    const serialSelected = selectedHosts.some((h) => h.connectionType === 'serial');
+    const serialNote = serialSelected
+      ? `\n\n**串口主机注意事项**：选中的主机包含串口连接（Console 控制台，常用于交换机/路由器初始化）。这些设备通过串口控制台交互，命令执行采用"发送命令 -> 等待提示符 -> 收集输出"的方式，没有退出码概念。请使用设备厂商 CLI 命令（如华为 VRP 的 \`display\`/\`system-view\`，思科 IOS 的 \`show\`/\`configure terminal\`），不要使用 Linux 文件操作类工具（read_file/write_file/rollback 不支持）。分页输出会被自动翻页。`
+      : '';
     staticSections.push(`## 本次会话选中的主机
 
 ${hostList}
 
 你只能对以上主机执行操作。工具调用时 host 参数可省略（默认使用第一台），也可指定其中任一主机名实现多主机操作。
 
-**用户可使用 @host 语法指定主机**：当用户消息中出现 \`@主机名\` 时，应优先对该主机执行后续命令。例如 \`@hermes 检查磁盘\` 表示在 hermes 上执行磁盘检查。`);
+**用户可使用 @host 语法指定主机**：当用户消息中出现 \`@主机名\` 时，应优先对该主机执行后续命令。例如 \`@hermes 检查磁盘\` 表示在 hermes 上执行磁盘检查。${serialNote}`);
   } else {
     staticSections.push(`## 本次会话选中的主机
 
@@ -153,7 +165,7 @@ ${
   params.safetyMode === 'sentinel'
     ? '- READ 命令（ls/cat/grep/ps 等）：自动执行\n- WRITE/SUDO 命令：拦截，不可执行\n- 你只能进行诊断和分析，不能修改任何状态'
     : params.safetyMode === 'operator'
-      ? '- READ 命令：自动执行\n- WRITE/SUDO 命令：**直接调用工具即可**，系统会自动弹出授权弹窗供用户确认，你不需要在文本中询问用户是否授权\n- **禁止**在回复中用文字询问"是否授权执行"--这会绕过授权弹窗，导致用户无法点击批准/拒绝\n- 正确做法：直接调用 exec/sudo_exec/write_file 工具，系统自动处理授权流程\n- 用户可在弹窗中编辑命令后批准，或拒绝。用户拒绝后，工具会返回明确的拒绝反馈（含被拒命令与原因）；**不要重复尝试相同或类似的命令**，应使用 ask_user 工具向用户确认正确的执行路径。若用户"拒绝并停止"，说明当前任务方向需重新确认，必须停止执行需要授权的命令并询问用户如何继续'
+      ? '- READ 命令：自动执行\n- WRITE/SUDO 命令：**直接调用工具即可**，系统会自动弹出授权弹窗供用户确认，你不需要在文本中询问用户是否授权\n- **禁止**在回复中用文字询问"是否授权执行"--这会绕过授权弹窗，导致用户无法点击批准/拒绝\n- 正确做法：直接调用 exec/sudo_exec/write_file 工具，系统自动处理授权流程\n- 用户可在弹窗中编辑命令后批准，或拒绝。用户拒绝后，工具会返回明确的拒绝反馈（含被拒命令与原因）；**不要重复尝试相同或类似的命令**，应使用 ask_user 工具向用户确认正确的执行路径。若用户"拒绝并停止"，必须停止执行任何需要授权的命令，简要总结已完成的进展后停止，**不要调用 ask_user 或其他工具**，等待用户进一步指示'
       : '- 所有命令类型：自动执行，无需用户确认\n- 你需要自行判断操作风险，谨慎决策'
 }`);
 
@@ -173,8 +185,16 @@ ${
     const hasIncomplete = params.todos.some(
       (t) => t.status === 'in_progress' || t.status === 'pending',
     );
+    // V3-10: only inject the strong "continue executing" directive when the
+    // user's latest message explicitly requests continuation. Otherwise
+    // (question, confirmation-seeking, or neutral), inject a softer directive
+    // that tells the model to answer the question with text first and NOT
+    // auto-resume writes. Prevents the agent from treating a question like
+    // "以上动作不影响用户的请求吧" as approval to proceed.
     const directive = hasIncomplete
-      ? '\n\n检测到未完成任务列表。请从第一个未完成（进行中/待办）步骤继续执行；**不要重新创建任务列表，不要重复执行已完成的步骤**；仅通过 todo_write 工具推进状态。'
+      ? params.userRequestsContinuation
+        ? '\n\n检测到未完成任务列表，且用户要求继续。请从第一个未完成（进行中/待办）步骤继续执行；**不要重新创建任务列表，不要重复执行已完成的步骤**；仅通过 todo_write 工具推进状态。'
+        : '\n\n检测到未完成任务列表，但用户当前消息未明确要求继续执行。**若用户在提问或求证（参见操作规范"提问/确认类"），仅用文本回答，不得调用 exec/sudo_exec/write_file 等写操作工具**。仅当用户当前消息明确表示"继续/执行/开始/接着做"时，才从第一个未完成步骤恢复执行（不要重新创建任务列表、不要重复已完成步骤）。'
       : '\n\n所有步骤均已完成。如用户有新需求，再创建新的任务列表。';
     dynamicSections.push(`## 当前任务列表进度\n\n${lines.join('\n')}${directive}`);
   }
@@ -252,6 +272,7 @@ ${skillList}
 1. **识别用户意图范围**（最重要）：根据用户措辞判断本次请求的范围，严格限制在用户要求的范围内：
    - **不延伸范围**：仅处理用户本次明确要求的事项。系统提示"主机运行时状态"中的异常（失败服务、内核错误等）仅供了解现状，**未经用户明确要求不得对其展开调查或修复**；最多在回复末尾一句话提示，由用户决定是否处理
    - **仅分析/查看类**（分析、查看、检查、排查、诊断、看看、确认、了解）：只执行 READ 命令收集信息，给出诊断结论和建议方案。**禁止**擅自执行 WRITE/SUDO 修复操作。如果认为需要修复，在文本中说明建议，并使用 ask_user 询问用户是否需要执行
+   - **提问/确认类**（用户在提问、求证、征询意见，例如"会不会影响""是否需要""能不能""没问题吧""以上动作不影响吧"）：**仅用文本回答，不得调用 exec/sudo_exec/write_file 等写操作工具**。即使此前已提出执行方案、或上下文存在未完成任务列表，也**不得据此自行开始执行**；必须等用户明确下达执行指令（如"执行""开始""继续""确认执行"）后，再调用写操作工具。历史对话或已提出的方案不构成对新执行的批准
    - **操作/修复类**（修复、解决、处理、安装、配置、部署、修改、开启、关闭、更新、卸载）：可以执行 WRITE/SUDO 操作，按规则 3 直接调用工具
    - **不明确时**：使用 ask_user 确认用户是否需要执行修复，不要擅自行动
    - 先用 READ 命令收集信息（日志、状态、指标），再决定是否需要修改操作

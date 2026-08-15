@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { decideRightClickAction } from '../terminal-right-click.js';
 
 describe('decideRightClickAction', () => {
-  it('copies in quick mode when there is a selection', () => {
-    expect(decideRightClickAction(true, 'quick', false)).toBe('copy');
+  it('copies and inserts in quick mode when there is a selection', () => {
+    // jumpserver-style: right-click with a selection copies it to the
+    // clipboard AND inserts it at the cursor.
+    expect(decideRightClickAction(true, 'quick', false)).toBe('copyAndInsert');
   });
 
   it('pastes in quick mode when there is no selection', () => {

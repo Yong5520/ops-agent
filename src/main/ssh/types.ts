@@ -1,5 +1,6 @@
 import type { Client } from 'ssh2';
 import type { SFTPWrapper } from 'ssh2';
+import type { DeviceType } from '../../shared/types.js';
 
 // SSH connection configuration passed to ssh2.Client.connect().
 // Built from a HostConfig record (decrypted from DB) by the connection pool.
@@ -13,6 +14,9 @@ export interface SshClientConfig {
   sudoPassword?: string;
   suPassword?: string;
   timeoutMs: number;
+  // Device type: selects the exec profile (PTY for paginating network-device
+  // CLIs, no-PTY for Linux). Undefined -> 'linux' (no-PTY) in the manager.
+  deviceType?: DeviceType;
   // V3-09: SSH bastion / agent forwarding / host-key verification.
   /** Enable OpenSSH agent forwarding on this connection. */
   agentForward?: boolean;

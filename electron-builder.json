@@ -14,7 +14,9 @@
   "asarUnpack": [
     "**/*.{node,dll}",
     "node_modules/better-sqlite3/**/*",
-    "node_modules/ssh2/**/*"
+    "node_modules/ssh2/**/*",
+    "node_modules/serialport/**/*",
+    "node_modules/@serialport/**/*"
   ],
   "nsis": {
     "oneClick": false,

@@ -82,6 +82,50 @@ describe('buildConnectConfig', () => {
     expect(verify).toHaveBeenCalledWith(true);
   });
 
+  it('V3-09: hostVerifier calls onMismatch with expected+actual on mismatch', () => {
+    // The mismatch callback lets the connection manager augment the eventual
+    // ssh2 "Host denied (verification failed)" error with the actual fingerprints
+    // so the user can diagnose a stale stored fingerprint.
+    const onMismatch = vi.fn();
+    const cfg = buildConnectConfig(makeConfig({ hostKeyFingerprint: 'SHA256:expected' }), {
+      onMismatch,
+    });
+    const hostVerifier = cfg.hostVerifier as (
+      key: Buffer | string,
+      verify: (ok: boolean) => void,
+    ) => void;
+    const verify = vi.fn();
+    hostVerifier('different-key-bytes', verify);
+    expect(verify).toHaveBeenCalledWith(false);
+    expect(onMismatch).toHaveBeenCalledTimes(1);
+    expect(onMismatch.mock.calls[0][0]).toBe('SHA256:expected'); // expected
+    const actualFp =
+      'SHA256:' +
+      createHash('sha256')
+        .update(Buffer.from('different-key-bytes'))
+        .digest('base64')
+        .replace(/=+$/, '');
+    expect(onMismatch.mock.calls[0][1]).toBe(actualFp); // actual fingerprint
+  });
+
+  it('V3-09: hostVerifier does NOT call onMismatch on match', () => {
+    const onMismatch = vi.fn();
+    const keyBytes = Buffer.from('my-host-key');
+    const expected =
+      'SHA256:' + createHash('sha256').update(keyBytes).digest('base64').replace(/=+$/, '');
+    const cfg = buildConnectConfig(makeConfig({ hostKeyFingerprint: expected }), {
+      onMismatch,
+    });
+    const hostVerifier = cfg.hostVerifier as (
+      key: Buffer | string,
+      verify: (ok: boolean) => void,
+    ) => void;
+    const verify = vi.fn();
+    hostVerifier(keyBytes, verify);
+    expect(verify).toHaveBeenCalledWith(true);
+    expect(onMismatch).not.toHaveBeenCalled();
+  });
+
   it('V3-09: omits hostVerifier when no hostKeyFingerprint and no onHostKey', () => {
     const cfg = buildConnectConfig(makeConfig());
     expect(cfg.hostVerifier).toBeUndefined();

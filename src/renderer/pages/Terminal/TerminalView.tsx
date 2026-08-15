@@ -6,6 +6,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { useTerminalStore } from '../../store/terminalStore.js';
 import { decideRightClickAction } from '../../lib/terminal-right-click.js';
+import { decideCtrlCAction } from '../../lib/terminal-keyboard.js';
 import '@xterm/xterm/css/xterm.css';
 
 interface TerminalViewProps {
@@ -373,10 +374,32 @@ export function TerminalView({
         e.preventDefault();
         const text = window.opsAgent.clipboard.readText();
         if (text) {
-          window.opsAgent.terminal.input(sessionId, text);
+          // term.paste applies xterm's paste transforms (CRLF->CR + bracketed
+          // paste wrapping using xterm's authoritative mode) and fires onData
+          // once, which the onData handler sends to the SSH shell.
+          term.paste(text);
         }
         return false;
       }
+      // Plain Ctrl+C (no Shift): jumpserver-style - copy when there is a
+      // selection, otherwise let xterm send SIGINT (\x03). The Shift variant
+      // above handles explicit copy, so require !shiftKey to avoid conflict.
+      if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+        if (decideCtrlCAction(term.hasSelection()) === 'copy') {
+          e.preventDefault();
+          const selection = term.getSelection();
+          if (selection) {
+            window.opsAgent.clipboard.writeText(selection);
+            flashCopied();
+          }
+          return false;
+        }
+        return true;
+      }
+      // Plain Ctrl+V (no Shift): let xterm handle it natively. xterm's paste
+      // event applies the same transforms as term.paste() and fires onData
+      // once. Intercepting Ctrl+V here would double-paste (our call plus the
+      // browser's paste event), so we deliberately do NOT intercept it.
       return true;
     });
 
@@ -429,18 +452,27 @@ export function TerminalView({
   const handlePaste = () => {
     const text = window.opsAgent.clipboard.readText();
     if (text) {
-      window.opsAgent.terminal.input(sessionId, text);
+      // term.paste applies xterm's paste transforms (CRLF->CR + bracketed
+      // paste wrapping) and fires onData once -> sent to the SSH shell.
+      termRef.current?.paste(text);
     }
     // Re-focus immediately so the terminal keeps keyboard focus.
     termRef.current?.focus();
   };
 
-  // MobaXterm-style quick copy/paste (right-click without the menu)
-  const handleQuickCopy = () => {
+  // MobaXterm/jumpserver-style quick copy/paste (right-click without the menu).
+  // With a selection: copy it to the clipboard AND insert it at the cursor so a
+  // highlighted snippet drops straight onto the command line. Without a
+  // selection: paste from the clipboard.
+  const handleQuickCopyAndInsert = () => {
     const selection = termRef.current?.getSelection();
     if (selection) {
       window.opsAgent.clipboard.writeText(selection);
       flashCopied();
+      // Insert the selected text at the cursor via xterm's paste path (applies
+      // paste transforms, so a multi-line selection is inserted as one blob
+      // when the shell has bracketed paste mode enabled).
+      termRef.current?.paste(selection);
     }
     termRef.current?.focus();
   };
@@ -448,7 +480,7 @@ export function TerminalView({
   const handleQuickPaste = () => {
     const text = window.opsAgent.clipboard.readText();
     if (text) {
-      window.opsAgent.terminal.input(sessionId, text);
+      termRef.current?.paste(text);
     }
     termRef.current?.focus();
   };
@@ -481,8 +513,8 @@ export function TerminalView({
       e.shiftKey,
     );
     switch (action) {
-      case 'copy':
-        handleQuickCopy();
+      case 'copyAndInsert':
+        handleQuickCopyAndInsert();
         return;
       case 'paste':
         handleQuickPaste();

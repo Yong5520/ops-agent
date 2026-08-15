@@ -23,6 +23,7 @@ function makeHost(overrides: Partial<HostConfig> = {}): HostConfig {
     groupName: 'default',
     timeoutMs: 60000,
     agentForward: false,
+    deviceType: 'linux',
     createdAt: '2026-01-01',
     updatedAt: '2026-01-01',
     ...overrides,
@@ -113,6 +114,7 @@ describe('renderJumpUsername', () => {
     groupName: 'default',
     timeoutMs: 60000,
     agentForward: false,
+    deviceType: 'linux',
     createdAt: '2026-01-01',
     updatedAt: '2026-01-01',
   };
@@ -126,6 +128,7 @@ describe('renderJumpUsername', () => {
     groupName: 'default',
     timeoutMs: 60000,
     agentForward: false,
+    deviceType: 'linux',
     createdAt: '2026-01-01',
     updatedAt: '2026-01-01',
   };
@@ -159,6 +162,7 @@ describe('buildSshConfig encoded mode', () => {
     groupName: 'default',
     timeoutMs: 60000,
     agentForward: false,
+    deviceType: 'linux',
     createdAt: '2026-01-01',
     updatedAt: '2026-01-01',
   };
@@ -173,6 +177,7 @@ describe('buildSshConfig encoded mode', () => {
     groupName: 'default',
     timeoutMs: 60000,
     agentForward: false,
+    deviceType: 'linux',
     jumpHostId: 'b1',
     jumpMode: 'encoded',
     createdAt: '2026-01-01',

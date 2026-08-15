@@ -3,6 +3,7 @@ import type { CoreSystemMessage, CoreMessage } from 'ai';
 import { createLanguageModel, resolveModelProvider, validateModelExists } from './providers.js';
 import { createTools } from './tools.js';
 import { buildSystemPrompt } from './system-prompt.js';
+import { isContinuationRequest } from './user-intent.js';
 import {
   loadMessages,
   compressContext,
@@ -129,6 +130,10 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       safetyMode,
       hostFacts,
       todos: persistedTodos,
+      // V3-10: only inject the strong "continue executing" resume directive
+      // when the user's latest message explicitly asks to continue. A question
+      // ("以上动作不影响用户的请求吧") must not auto-trigger resumption.
+      userRequestsContinuation: isContinuationRequest(userMessage),
     });
 
     // ── 3. Resolve this session's model (needed before context compression) ─
@@ -339,6 +344,26 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
     });
 
     while (stalled) {
+      // Phase 3: drain queued steer messages (user typed mid-run to redirect
+      // the task). Inject each as a user message before this round so the
+      // model reacts to the user's input. Skipped during wind-down (the user
+      // asked to stop) and after abort. The previous round's response is
+      // already folded into `messages` by every continue-path, so appending
+      // here preserves conversation ordering.
+      const topSteers = params.consumeSteerMessages?.() ?? [];
+      if (topSteers.length > 0 && !windDownDone && !abortSignal?.aborted) {
+        for (const steer of topSteers) {
+          messages = [...messages, { role: 'user' as const, content: steer.text }];
+        }
+        // Notify the caller these queued steers have been fed to the model so
+        // the renderer can move them from the pending queue into the message
+        // list (after the previous round's response, before this round's).
+        params.onSteerConsumed?.(topSteers);
+        fullText += '\n\n';
+        params.onTextStream('\n\n');
+        stalled = true;
+      }
+
       toolCallCount = 0;
       lastFinishReason = '';
       roundText = '';
@@ -760,6 +785,32 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
         }
       } else {
         stalled = false;
+      }
+
+      // Phase 3: unified exit-drain. If the loop was about to exit (stalled
+      // became false) but the user queued a steer mid-round, fold this round's
+      // response and inject the steer so the model reacts to it instead of
+      // ending the turn. Runs for every fall-through exit path (no-tool finish,
+      // substantive-with-tools, recovery-exhausted). Nudge/continuation paths
+      // set stalled=true, so this is skipped for them (no double-fold of the
+      // response). Skipped during wind-down (user asked to stop) and abort.
+      if (!stalled && !windDownDone && !abortSignal?.aborted && result) {
+        const exitSteers = params.consumeSteerMessages?.() ?? [];
+        if (exitSteers.length > 0) {
+          try {
+            const resp = await result.response;
+            messages = [...messages, ...resp.messages];
+          } catch {
+            logger.warn('[Agent] Steer: interrupted response unavailable; using existing messages');
+          }
+          for (const steer of exitSteers) {
+            messages = [...messages, { role: 'user' as const, content: steer.text }];
+          }
+          params.onSteerConsumed?.(exitSteers);
+          fullText += '\n\n';
+          params.onTextStream('\n\n');
+          stalled = true;
+        }
       }
     }
 

@@ -52,6 +52,18 @@ describe('buildRejectionFeedback', () => {
     expect(msg).toContain('dd if=/dev/zero of=/dev/sda');
     expect(msg).toContain('危险操作');
     expect(msg).toContain('停止当前任务');
+  });
+
+  it('does NOT direct the model to ask_user when stopRequested is true', () => {
+    // The user clicked "拒绝并停止" - they want the task to STOP, not be
+    // asked another question. Directing the model to ask_user here is what
+    // caused the post-rejection hang (wind-down -> ask_user blocks).
+    const msg = buildRejectionFeedback({ command: 'ls', stopRequested: true });
+    expect(msg).not.toContain('ask_user');
+  });
+
+  it('still directs the model to ask_user on a plain (non-stop) reject', () => {
+    const msg = buildRejectionFeedback({ command: 'ls' });
     expect(msg).toContain('ask_user');
   });
 
@@ -72,8 +84,12 @@ describe('WIND_DOWN_DIRECTIVE', () => {
     expect(WIND_DOWN_DIRECTIVE).toMatch(/exec|执行/);
   });
 
-  it('tells the model to summarize progress and ask the user', () => {
+  it('tells the model to summarize progress and stop without tools or questions', () => {
     expect(WIND_DOWN_DIRECTIVE).toContain('总结');
-    expect(WIND_DOWN_DIRECTIVE).toContain('ask_user');
+    // The wind-down turn must NOT direct the model to call ask_user - that
+    // created an unabortable blocking tool call and hung the loop after the
+    // user clicked "拒绝并停止".
+    expect(WIND_DOWN_DIRECTIVE).not.toContain('ask_user');
+    expect(WIND_DOWN_DIRECTIVE).toContain('工具');
   });
 });

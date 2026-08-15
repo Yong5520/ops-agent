@@ -1,6 +1,24 @@
 import { getDb } from './database.js';
 import { encrypt, decrypt } from './crypto.js';
-import type { HostConfig, HostInput } from '../../shared/types.js';
+import { validateSerialHost } from '../serial/serial-options.js';
+import type { HostConfig, HostInput, DeviceType, ConnectionType } from '../../shared/types.js';
+
+/**
+ * V3-10: returns true when an update payload changes the host's network
+ * address (host or port) relative to the existing record. When the address
+ * changes, the stored host_key_fingerprint is stale - it belongs to the old
+ * endpoint's server key - so update() must clear it and let the next connect
+ * re-run TOFU. Pure + exported for direct unit testing.
+ */
+export function hostAddressChanged(
+  existing: { host: string; port: number },
+  payload: { host?: string; port?: number },
+): boolean {
+  return (
+    (payload.host !== undefined && payload.host !== existing.host) ||
+    (payload.port !== undefined && payload.port !== existing.port)
+  );
+}
 
 interface HostRow {
   id: string;
@@ -21,6 +39,15 @@ interface HostRow {
   jump_mode: string | null;
   jump_username_template: string | null;
   jump_target_auth: string | null;
+  device_type: string;
+  connection_type: string;
+  serial_port: string | null;
+  baud_rate: number | null;
+  data_bits: number | null;
+  stop_bits: number | null;
+  parity: string | null;
+  flow_control: string | null;
+  login_required: number;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +75,17 @@ function rowToConfig(row: HostRow, includeSecrets = false): HostConfig {
     jumpMode: (row.jump_mode ?? 'forward') as 'forward' | 'encoded',
     jumpUsernameTemplate: row.jump_username_template ?? undefined,
     jumpTargetAuth: (row.jump_target_auth ?? 'bastion-managed') as 'bastion-managed' | 'password',
+    deviceType: (row.device_type ?? 'linux') as DeviceType,
+    // Serial console fields (v17). Migrated rows lack the columns -> default
+    // to a plain SSH host.
+    connectionType: (row.connection_type ?? 'ssh') as ConnectionType,
+    serialPort: row.serial_port ?? undefined,
+    baudRate: row.baud_rate ?? undefined,
+    dataBits: (row.data_bits ?? undefined) as 7 | 8 | undefined,
+    stopBits: (row.stop_bits ?? undefined) as 1 | 2 | undefined,
+    parity: (row.parity ?? undefined) as HostConfig['parity'],
+    flowControl: (row.flow_control ?? undefined) as HostConfig['flowControl'],
+    loginRequired: row.login_required === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -71,27 +109,45 @@ export const hostsStore = {
   },
 
   create(payload: HostInput): HostConfig {
-    if (payload.authType === 'password' && !payload.password) {
-      throw new Error('密码认证方式需要填写密码');
+    const connectionType = payload.connectionType ?? 'ssh';
+    if (connectionType === 'serial') {
+      const serialError = validateSerialHost(payload);
+      if (serialError) {
+        throw new Error(serialError);
+      }
+    } else {
+      if (payload.authType === 'password' && !payload.password) {
+        throw new Error('密码认证方式需要填写密码');
+      }
+      if (payload.authType === 'key' && !payload.keyPath) {
+        throw new Error('密钥认证方式需要填写密钥文件路径');
+      }
     }
-    if (payload.authType === 'key' && !payload.keyPath) {
-      throw new Error('密钥认证方式需要填写密钥文件路径');
-    }
+    const isSerial = connectionType === 'serial';
     const db = getDb();
     const stmt = db.prepare(`
       INSERT INTO hosts (name, host, port, username, auth_type, password, key_path,
                          sudo_password, su_password, group_name, timeout_ms,
                          jump_host_id, agent_forward, host_key_fingerprint,
-                         jump_mode, jump_username_template, jump_target_auth)
+                         jump_mode, jump_username_template, jump_target_auth,
+                         device_type,
+                         connection_type, serial_port, baud_rate, data_bits,
+                         stop_bits, parity, flow_control, login_required)
       VALUES (@name, @host, @port, @username, @authType, @password, @keyPath,
               @sudoPassword, @suPassword, @groupName, @timeoutMs,
               @jumpHostId, @agentForward, @hostKeyFingerprint,
-              @jumpMode, @jumpUsernameTemplate, @jumpTargetAuth)
+              @jumpMode, @jumpUsernameTemplate, @jumpTargetAuth,
+              @deviceType,
+              @connectionType, @serialPort, @baudRate, @dataBits,
+              @stopBits, @parity, @flowControl, @loginRequired)
       RETURNING *
     `);
     const row = stmt.get({
       name: payload.name,
-      host: payload.host,
+      // Serial hosts have no network address: mirror the port path into `host`
+      // so NOT NULL holds and audit logs / terminal titles show a meaningful
+      // "address" (e.g. COM3).
+      host: isSerial ? payload.serialPort!.trim() : payload.host,
       port: payload.port,
       username: payload.username,
       authType: payload.authType,
@@ -107,6 +163,17 @@ export const hostsStore = {
       jumpMode: payload.jumpMode ?? 'forward',
       jumpUsernameTemplate: payload.jumpUsernameTemplate ?? null,
       jumpTargetAuth: payload.jumpTargetAuth ?? 'bastion-managed',
+      deviceType: payload.deviceType ?? 'linux',
+      // Serial console fields: resolved defaults (8N1, no flow control) are
+      // persisted so a later default change never alters existing hosts.
+      connectionType,
+      serialPort: isSerial ? payload.serialPort!.trim() : null,
+      baudRate: isSerial ? (payload.baudRate ?? 9600) : null,
+      dataBits: isSerial ? (payload.dataBits ?? 8) : null,
+      stopBits: isSerial ? (payload.stopBits ?? 1) : null,
+      parity: isSerial ? (payload.parity ?? 'none') : null,
+      flowControl: isSerial ? (payload.flowControl ?? 'none') : null,
+      loginRequired: isSerial && payload.loginRequired ? 1 : 0,
     }) as HostRow;
     return rowToConfig(row);
   },
@@ -117,9 +184,40 @@ export const hostsStore = {
     if (!existing) {
       throw new Error(`Host not found: ${id}`);
     }
+    const connectionType = payload.connectionType ?? existing.connectionType ?? 'ssh';
+    const serialPort = payload.serialPort ?? existing.serialPort;
+    const baudRate = payload.baudRate ?? existing.baudRate;
+    const dataBits = payload.dataBits ?? existing.dataBits;
+    const stopBits = payload.stopBits ?? existing.stopBits;
+    const parity = payload.parity ?? existing.parity;
+    const flowControl = payload.flowControl ?? existing.flowControl;
+    const loginRequired = payload.loginRequired ?? existing.loginRequired ?? false;
+    if (connectionType === 'serial') {
+      // Validate the merged serial settings (not just the payload slice) so a
+      // partial update can't leave the record invalid. Credentials come from
+      // getWithSecrets: this.get() never decrypts the stored password, so a
+      // login-enabled host could never pass an edit that omits the password.
+      const existingSecrets = this.getWithSecrets(id) ?? existing;
+      const serialError = validateSerialHost({
+        serialPort,
+        baudRate,
+        dataBits,
+        stopBits,
+        parity,
+        flowControl,
+        loginRequired,
+        username: payload.username ?? existingSecrets.username,
+        password: payload.password ?? existingSecrets.password,
+      });
+      if (serialError) {
+        throw new Error(serialError);
+      }
+    }
+    const isSerial = connectionType === 'serial';
     const merged: HostInput = {
       name: payload.name ?? existing.name,
-      host: payload.host ?? existing.host,
+      // Serial hosts mirror the port path into `host` (their display address).
+      host: isSerial ? serialPort!.trim() : (payload.host ?? existing.host),
       port: payload.port ?? existing.port,
       username: payload.username ?? existing.username,
       authType: payload.authType ?? existing.authType,
@@ -131,10 +229,27 @@ export const hostsStore = {
       timeoutMs: payload.timeoutMs ?? existing.timeoutMs,
       jumpHostId: payload.jumpHostId ?? existing.jumpHostId,
       agentForward: payload.agentForward ?? existing.agentForward,
-      hostKeyFingerprint: payload.hostKeyFingerprint ?? existing.hostKeyFingerprint,
+      // V3-10: if the host address (host or port) changed, the previously
+      // recorded fingerprint belongs to the old endpoint's server key and is
+      // now stale - null it out so the next connect re-runs TOFU instead of
+      // hard-failing with "Host denied (verification failed)". When the address
+      // is unchanged, preserve the fingerprint (explicit payload value wins,
+      // else the existing one).
+      hostKeyFingerprint: hostAddressChanged(existing, payload)
+        ? undefined
+        : (payload.hostKeyFingerprint ?? existing.hostKeyFingerprint),
       jumpMode: payload.jumpMode ?? existing.jumpMode ?? 'forward',
       jumpUsernameTemplate: payload.jumpUsernameTemplate ?? existing.jumpUsernameTemplate,
       jumpTargetAuth: payload.jumpTargetAuth ?? existing.jumpTargetAuth ?? 'bastion-managed',
+      deviceType: payload.deviceType ?? existing.deviceType ?? 'linux',
+      connectionType,
+      serialPort,
+      baudRate,
+      dataBits,
+      stopBits,
+      parity,
+      flowControl,
+      loginRequired,
     };
     db.prepare(
       `
@@ -147,6 +262,11 @@ export const hostsStore = {
           host_key_fingerprint = @hostKeyFingerprint,
           jump_mode = @jumpMode, jump_username_template = @jumpUsernameTemplate,
           jump_target_auth = @jumpTargetAuth,
+          device_type = @deviceType,
+          connection_type = @connectionType, serial_port = @serialPort,
+          baud_rate = @baudRate, data_bits = @dataBits, stop_bits = @stopBits,
+          parity = @parity, flow_control = @flowControl,
+          login_required = @loginRequired,
           updated_at = datetime('now')
       WHERE id = @id
     `,
@@ -169,6 +289,15 @@ export const hostsStore = {
       jumpMode: merged.jumpMode,
       jumpUsernameTemplate: merged.jumpUsernameTemplate ?? null,
       jumpTargetAuth: merged.jumpTargetAuth,
+      deviceType: merged.deviceType,
+      connectionType: merged.connectionType ?? 'ssh',
+      serialPort: isSerial ? (merged.serialPort ?? null) : null,
+      baudRate: isSerial ? (merged.baudRate ?? 9600) : null,
+      dataBits: isSerial ? (merged.dataBits ?? 8) : null,
+      stopBits: isSerial ? (merged.stopBits ?? 1) : null,
+      parity: isSerial ? (merged.parity ?? 'none') : null,
+      flowControl: isSerial ? (merged.flowControl ?? 'none') : null,
+      loginRequired: isSerial && merged.loginRequired ? 1 : 0,
     });
     return this.get(id)!;
   },
@@ -177,7 +306,9 @@ export const hostsStore = {
   // through update(). update() merges via this.get() (no secrets), which would
   // null out password/sudoPassword/suPassword. This targeted UPDATE touches only
   // the fingerprint column so credentials survive. Used by the pool's TOFU path.
-  setHostKeyFingerprint(id: string, fingerprint: string): void {
+  // V3-10: fingerprint is nullable - passing null clears the stored fingerprint
+  // (used by the Settings "清除主机密钥" button to recover from a stale record).
+  setHostKeyFingerprint(id: string, fingerprint: string | null): void {
     getDb()
       .prepare(
         `UPDATE hosts SET host_key_fingerprint = ?, updated_at = datetime('now') WHERE id = ?`,

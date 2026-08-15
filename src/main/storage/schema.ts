@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS hosts (
   jump_mode               TEXT NOT NULL DEFAULT 'forward',
   jump_username_template  TEXT,
   jump_target_auth        TEXT NOT NULL DEFAULT 'bastion-managed',
+  -- Serial console support (migration v17). connection_type 'serial' = local
+  -- COM/tty port instead of SSH; serial parameter columns are nullable
+  -- (absent = 9600 8N1 no flow control).
+  connection_type  TEXT NOT NULL DEFAULT 'ssh',
+  serial_port      TEXT,
+  baud_rate        INTEGER,
+  data_bits        INTEGER,
+  stop_bits        INTEGER,
+  parity           TEXT,
+  flow_control     TEXT,
+  login_required   INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );

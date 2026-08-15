@@ -84,6 +84,7 @@ export function buildSshConfig(
       port: bastion.port,
       username: renderJumpUsername(host.jumpUsernameTemplate, bastion, host),
       timeoutMs: host.timeoutMs,
+      deviceType: host.deviceType,
     };
     // V3-09.1/M2: the SSH connection terminates at the BASTION, so host-key
     // verification uses the BASTION's fingerprint. The pool points onHostKey
@@ -119,6 +120,7 @@ export function buildSshConfig(
     port: host.port,
     username: host.username,
     timeoutMs: host.timeoutMs,
+    deviceType: host.deviceType,
   };
 
   if (host.authType === 'password' && host.password) {

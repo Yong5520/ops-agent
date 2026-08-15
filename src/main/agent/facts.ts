@@ -1,5 +1,6 @@
 import { connectionPool } from '../ssh/index.js';
 import { execCommand } from '../ssh/executor.js';
+import { hostsStore } from '../storage/hosts.js';
 import { logger } from '../utils/logger.js';
 
 // Host facts gatherer — collects runtime system info (OS, kernel, CPU,
@@ -56,6 +57,15 @@ export async function gatherHostFacts(hostId: string, hostName: string): Promise
   const cached = factsCache.get(hostId);
   if (cached && Date.now() - cached.cachedAt < FACTS_TTL_MS) {
     return cached;
+  }
+
+  // V3-11: the gather command is Linux-specific. Serial console devices
+  // (switches/routers) have a different CLI - skip fact-gathering for them;
+  // the model discovers the device via exec. (Per-vendor probe commands are a
+  // future enhancement.)
+  const host = hostsStore.get(hostId);
+  if (host?.connectionType === 'serial') {
+    return null;
   }
 
   try {

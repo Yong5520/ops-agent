@@ -6,7 +6,9 @@ import { TerminalView } from './TerminalView.js';
 import { FileTransferPanel } from './FileTransferPanel.js';
 import { SnippetsBar } from './SnippetsBar.js';
 import { AiCommandBar } from './AiCommandBar.js';
+import { SearchInput } from '../../components/SearchInput.js';
 import { cn } from '../../lib/cn.js';
+import { filterHosts } from '../../utils/host-search.js';
 import type { HostConfig } from '../../../shared/types.js';
 
 // Collapsed group state for the terminal host list
@@ -43,6 +45,7 @@ export function TerminalPage() {
     toggleBroadcast,
   } = useTerminalStore();
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
+  const [searchQuery, setSearchQuery] = useState('');
   const [showFilePanel, setShowFilePanel] = useState(false);
   const [showSnippets, setShowSnippets] = useState(false);
   const [showAiBar, setShowAiBar] = useState(false);
@@ -80,6 +83,10 @@ export function TerminalPage() {
   }, [openLocalTab]);
 
   const toggleGroup = (group: string) => {
+    // Ignore group toggles while searching: groups are force-expanded during a
+    // search, so a click would mutate/persist collapse state with no visible
+    // feedback, then surface as a surprise collapse after the search clears.
+    if (searchQuery.trim()) return;
     const next = new Set(collapsed);
     if (next.has(group)) {
       next.delete(group);
@@ -90,8 +97,12 @@ export function TerminalPage() {
     saveCollapsed(next);
   };
 
-  // Group hosts by groupName
-  const grouped = hosts.reduce(
+  // Filter hosts by the search query (empty query = pass-through), then group
+  // by groupName. Filtering before grouping means groups with no matches drop
+  // out naturally, keeping search results compact. Force-expand every group
+  // while searching so matches are never hidden behind a collapsed header.
+  const filteredHosts = filterHosts(hosts, searchQuery);
+  const grouped = filteredHosts.reduce(
     (acc, h) => {
       const key = h.groupName || 'default';
       (acc[key] ??= []).push(h);
@@ -164,11 +175,20 @@ export function TerminalPage() {
         <div className="border-b border-zinc-800 px-4 py-3">
           <h1 className="text-lg font-semibold">终端</h1>
           <p className="text-xs text-zinc-500">点击主机打开交互式终端</p>
+          <SearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="搜索主机名称 / IP"
+            className="mt-2"
+          />
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto p-2">
           {hosts.length === 0 && <p className="px-2 py-4 text-xs text-zinc-600">未配置主机</p>}
+          {hosts.length > 0 && filteredHosts.length === 0 && (
+            <p className="px-2 py-4 text-xs text-zinc-600">未找到匹配的主机</p>
+          )}
           {Object.entries(grouped).map(([group, groupHosts]) => {
-            const isCollapsed = collapsed.has(group);
+            const isCollapsed = searchQuery.trim() ? false : collapsed.has(group);
             return (
               <div key={group} className="mb-2">
                 <button
@@ -185,11 +205,19 @@ export function TerminalPage() {
                       const tab = tabs.find((t) => t.hostId === h.id);
                       const isActive = tab?.sessionId === activeTabId;
                       return (
-                        <button
+                        <div
                           key={h.id}
+                          role="button"
+                          tabIndex={0}
                           onClick={() => openTab(h)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              openTab(h);
+                            }
+                          }}
                           className={cn(
-                            'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors',
+                            'group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors',
                             isActive
                               ? 'bg-zinc-800 text-zinc-100'
                               : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200',
@@ -209,7 +237,31 @@ export function TerminalPage() {
                           />
                           <span className="flex-1 truncate">{h.name}</span>
                           <span className="truncate text-zinc-700">{h.host}</span>
-                        </button>
+                          {h.connectionType === 'serial' && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.opsAgent.serial.releasePort(h.id);
+                              }}
+                              className="shrink-0 text-amber-500/80 transition-colors hover:text-amber-400"
+                              title="释放串口（立即关闭该主机占用的 COM 端口，用于排障/让别的程序使用）"
+                            >
+                              ⏏
+                            </button>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              window.opsAgent.terminal.openWindow(h.id).catch(() => {
+                                // ignore - window creation failure is logged in main
+                              });
+                            }}
+                            className="shrink-0 text-zinc-600 opacity-0 transition-opacity hover:text-indigo-400 group-hover:opacity-100"
+                            title="在新窗口打开(可与 AI 对话页同时使用)"
+                          >
+                            🗗
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -374,6 +426,16 @@ export function TerminalPage() {
                 >
                   ✨
                 </button>
+                {activeTab &&
+                  hosts.find((h) => h.id === activeTab.hostId)?.connectionType === 'serial' && (
+                    <button
+                      onClick={() => window.opsAgent.serial.releasePort(activeTab.hostId)}
+                      className="rounded px-2 py-1 text-xs text-amber-500/80 transition-colors hover:bg-zinc-800 hover:text-amber-400"
+                      title="释放串口（立即关闭该主机占用的 COM 端口）"
+                    >
+                      ⏏ 释放串口
+                    </button>
+                  )}
               </div>
             </div>
 

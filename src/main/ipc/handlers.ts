@@ -1,5 +1,6 @@
 import { ipcMain, shell, type BrowserWindow } from 'electron';
 import { Channels } from './channels.js';
+import { createCancellablePending } from './cancellable-pending.js';
 import { logger } from '../utils/logger.js';
 import { hostsStore } from '../storage/hosts.js';
 import { modelsStore } from '../storage/models.js';
@@ -17,7 +18,12 @@ import { hooksStore } from '../storage/hooks.js';
 import { taskListsStore } from '../storage/task-lists.js';
 import { runAgentLoop } from '../agent/loop.js';
 import { exportSessionToMarkdown } from '../agent/export.js';
-import { clearSummaryCache, compressContext, loadMessages } from '../agent/context.js';
+import {
+  clearSummaryCache,
+  compressContext,
+  loadMessages,
+  saveUserMessage,
+} from '../agent/context.js';
 import { cleanupSessionResults } from '../agent/tool-results.js';
 import { analyzeContextBreakdown } from '../agent/context-breakdown.js';
 import { attachmentsStore } from '../storage/attachments.js';
@@ -53,7 +59,7 @@ import type {
   AgentPlanApprovalResponse,
   AgentAskUserResponse,
 } from './preload-api.js';
-import type { TodoItem, ModelProviderInput } from '../../shared/types.js';
+import type { TodoItem, ModelProviderInput, SteerEntry } from '../../shared/types.js';
 import type { PlanApprovalResult } from '../agent/tools/exit-plan-mode.js';
 import type { AskUserAnswer } from '../agent/tools/ask-user.js';
 
@@ -73,6 +79,13 @@ const pendingPlanApprovals = new Map<string, (result: PlanApprovalResult) => voi
 // Pending ask-user requests keyed by sessionId (P1-4).
 // Only one question dialog can be pending per session at a time.
 const pendingAskUser = new Map<string, (answers: AskUserAnswer[]) => void>();
+
+// Phase 3: queued steer messages keyed by sessionId. The user types mid-run to
+// redirect the task; the agent loop drains these (consumeSteerMessages) before
+// the next streamText round and injects each entry's text as a user message.
+// Each entry carries the renderer-assigned msgId so onSteerConsumed can report
+// back exactly which queued steers were fed to the model.
+const pendingSteerMessages = new Map<string, SteerEntry[]>();
 
 // Active agent loops keyed by sessionId. Each entry holds the AbortController
 // used to genuinely terminate the streaming loop when the user clicks Stop.
@@ -122,6 +135,15 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Hosts.CREATE_GROUP, async (_e, name: string) =>
     hostsStore.createGroup(name),
   );
+  ipcMain.handle(Channels.Hosts.CLEAR_HOST_KEY, async (_e, id: string) => {
+    // V3-10: clear the stored fingerprint (null) and invalidate the cached
+    // connection so the next connect re-runs TOFU with the server's current
+    // key. Recovers from a stale fingerprint after a host re-key or address
+    // change without requiring the user to edit the DB directly.
+    hostsStore.setHostKeyFingerprint(id, null);
+    connectionPool.invalidate(id);
+    return hostsStore.get(id);
+  });
 
   // ---------- Models ----------
   ipcMain.handle(Channels.Models.LIST, async () => modelsStore.list());
@@ -178,7 +200,10 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Sessions.DELETE, async (_e, id: string) => {
     // Abort any active agent loop for this session so the backend stops
     // cleanly instead of erroring on FK constraint failures when trying to
-    // save messages to a session that no longer exists.
+    // save messages to a session that no longer exists. The abort also
+    // resolves any pending authorization / ask_user / plan-approval promise
+    // for this session (via createCancellablePending) and removes it from the
+    // pending maps, so no orphaned resolver lingers for the deleted session.
     activeLoops.get(id)?.abort();
     activeLoops.delete(id);
     // Clear the cached context summary so stale entries for the deleted
@@ -277,6 +302,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
     const abortController = new AbortController();
     activeLoops.set(request.sessionId, abortController);
+    // Phase 3: discard any stale steer messages queued by a previous run (e.g.
+    // a steer that arrived in the residual window after the prior loop exited
+    // but before activeLoops was cleared). They were already persisted to the
+    // DB by the steer handler, so loadMessages will pick them up as history -
+    // dropping the queue entries here prevents the model from seeing them twice.
+    pendingSteerMessages.delete(request.sessionId);
     const win = mainWindow;
 
     // Run the loop asynchronously — the handler returns immediately after
@@ -321,23 +352,19 @@ export function registerIpcHandlers(win: BrowserWindow): void {
           sessionId: request.sessionId,
           ...authRequest,
         });
-        return new Promise<AuthorizationResponse>((resolve) => {
-          // Auto-reject after 5 minutes to prevent infinite hangs
-          const timeoutId = setTimeout(
-            () => {
-              if (pendingAuthorizations.has(authRequest.toolCallId)) {
-                pendingAuthorizations.delete(authRequest.toolCallId);
-                logger.warn(`[Agent] Authorization timed out for ${authRequest.toolCallId}`);
-                resolve({ approved: false, reason: '授权超时（5分钟未响应）' });
-              }
-            },
-            5 * 60 * 1000,
-          );
-
-          pendingAuthorizations.set(authRequest.toolCallId, (response) => {
-            clearTimeout(timeoutId);
-            resolve(response);
-          });
+        // Abortable + race-safe: resolves on user response, abort (Stop), or
+        // 5-min idle timeout. Previously a bare Promise that ignored the abort
+        // signal, so clicking Stop left the loop blocked here for 5 minutes.
+        return createCancellablePending<AuthorizationResponse>({
+          map: pendingAuthorizations,
+          key: authRequest.toolCallId,
+          signal: abortController.signal,
+          timeoutMs: 5 * 60 * 1000,
+          onTimeout: () => {
+            logger.warn(`[Agent] Authorization timed out for ${authRequest.toolCallId}`);
+            return { approved: false, reason: '授权超时（5分钟未响应）' };
+          },
+          onAbort: () => ({ approved: false, reason: '已取消' }),
         });
       },
       onComplete: (finalMessage) => {
@@ -367,23 +394,19 @@ export function registerIpcHandlers(win: BrowserWindow): void {
           sessionId: request.sessionId,
           plan,
         });
-        return new Promise<PlanApprovalResult>((resolve) => {
-          // Auto-reject after 10 minutes to prevent infinite hangs
-          const timeoutId = setTimeout(
-            () => {
-              if (pendingPlanApprovals.has(request.sessionId)) {
-                pendingPlanApprovals.delete(request.sessionId);
-                logger.warn(`[Agent] Plan approval timed out for session ${request.sessionId}`);
-                resolve({ approved: false, reason: 'Plan approval timed out (10 minutes)' });
-              }
-            },
-            10 * 60 * 1000,
-          );
-
-          pendingPlanApprovals.set(request.sessionId, (result) => {
-            clearTimeout(timeoutId);
-            resolve(result);
-          });
+        // Abortable + race-safe (keyed by sessionId). Previously a bare Promise
+        // that ignored the abort signal and whose timeout could delete a newer
+        // run's entry (the 1d race).
+        return createCancellablePending<PlanApprovalResult>({
+          map: pendingPlanApprovals,
+          key: request.sessionId,
+          signal: abortController.signal,
+          timeoutMs: 10 * 60 * 1000,
+          onTimeout: () => {
+            logger.warn(`[Agent] Plan approval timed out for session ${request.sessionId}`);
+            return { approved: false, reason: 'Plan approval timed out (10 minutes)' };
+          },
+          onAbort: () => ({ approved: false, reason: '已取消' }),
         });
       },
       onModeChange: (sessionId, newMode) => {
@@ -396,29 +419,52 @@ export function registerIpcHandlers(win: BrowserWindow): void {
           sessionId: request.sessionId,
           questions,
         });
-        return new Promise<AskUserAnswer[]>((resolve) => {
-          // Auto-dismiss after 10 minutes to prevent infinite hangs
-          const timeoutId = setTimeout(
-            () => {
-              if (pendingAskUser.has(request.sessionId)) {
-                pendingAskUser.delete(request.sessionId);
-                logger.warn(`[Agent] Ask-user timed out for session ${request.sessionId}`);
-                resolve([
-                  {
-                    question: questions[0]?.question ?? '',
-                    answer: '(超时未响应)',
-                    isOther: true,
-                  },
-                ]);
-              }
+        // Abortable + race-safe (keyed by sessionId). Previously a bare Promise
+        // that ignored the abort signal - clicking Stop during an ask_user left
+        // the loop blocked for up to 10 minutes (issues 1 & 2 root cause).
+        return createCancellablePending<AskUserAnswer[]>({
+          map: pendingAskUser,
+          key: request.sessionId,
+          signal: abortController.signal,
+          timeoutMs: 10 * 60 * 1000,
+          onTimeout: () => {
+            logger.warn(`[Agent] Ask-user timed out for session ${request.sessionId}`);
+            return [
+              {
+                question: questions[0]?.question ?? '',
+                answer: '(超时未响应)',
+                isOther: true,
+              },
+            ];
+          },
+          onAbort: () => [
+            {
+              question: questions[0]?.question ?? '',
+              answer: '(已取消)',
+              isOther: true,
             },
-            10 * 60 * 1000,
-          );
-
-          pendingAskUser.set(request.sessionId, (answers) => {
-            clearTimeout(timeoutId);
-            resolve(answers);
-          });
+          ],
+        });
+      },
+      consumeSteerMessages: () => {
+        // Drain the per-session steer queue (returns + clears). The loop calls
+        // this before each streamText round and once at exit so mid-run user
+        // input is injected as user messages.
+        const queued = pendingSteerMessages.get(request.sessionId);
+        if (!queued || queued.length === 0) return [];
+        pendingSteerMessages.delete(request.sessionId);
+        return queued;
+      },
+      onSteerConsumed: (entries) => {
+        // The loop drained these queued steers and will feed them to the model
+        // on the next round. Notify the renderer so it can move them from the
+        // pending queue into the message list at the right moment (after the
+        // current response, before the next one). The steers were already
+        // persisted when queued, so this only signals the UI transition.
+        if (entries.length === 0) return;
+        win.webContents.send(Channels.Agent.STEER_CONSUMED, {
+          sessionId: request.sessionId,
+          msgIds: entries.map((e) => e.msgId),
         });
       },
     })
@@ -443,10 +489,48 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     if (controller) {
       controller.abort();
       logger.info(`[Agent] Abort signal sent for session ${sessionId}`);
+      // Firing the AbortController resolves every pending authorization /
+      // ask_user / plan-approval promise for this session (via
+      // createCancellablePending's abort listener) with a cancellation value,
+      // and removes them from the pending maps. This is what lets
+      // runAgentLoop settle promptly so activeLoops is freed - previously the
+      // loop stayed blocked on an unabortable ask_user for up to 10 minutes
+      // and the next run threw "Agent loop already running".
     } else {
       logger.warn(`[Agent] No active loop to cancel for session ${sessionId}`);
     }
   });
+
+  ipcMain.handle(
+    Channels.Agent.STEER,
+    async (_e, request: { sessionId: string; message: string; msgId: string }) => {
+      // Phase 3: enqueue a steer message the user typed mid-run to redirect the
+      // task. Persist it immediately so it is never lost (even if the loop exits
+      // before draining the queue, the next run's loadMessages picks it up). If a
+      // loop is active, queue it for the loop to drain before the next round; if
+      // not, the saved message stands as the latest user turn for the next run.
+      // The renderer-assigned msgId flows back via agent:steer-consumed so the UI
+      // can move the queued bubble into the message list when the model sees it.
+      const { sessionId, message, msgId } = request;
+      const trimmed = message?.trim();
+      if (!trimmed) return;
+      try {
+        saveUserMessage(sessionId, trimmed);
+      } catch (err) {
+        logger.error(`[Agent] Failed to persist steer message: ${(err as Error).message}`);
+      }
+      if (activeLoops.has(sessionId)) {
+        const queue = pendingSteerMessages.get(sessionId) ?? [];
+        queue.push({ msgId, text: trimmed });
+        pendingSteerMessages.set(sessionId, queue);
+        logger.info(`[Agent] Steer message queued for session ${sessionId}`);
+      } else {
+        logger.warn(
+          `[Agent] Steer for session ${sessionId} with no active loop; saved as pending user turn`,
+        );
+      }
+    },
+  );
 
   ipcMain.handle(
     Channels.Agent.AUTHORIZATION_RESPONSE,

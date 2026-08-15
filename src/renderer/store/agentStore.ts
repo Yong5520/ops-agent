@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { SafetyMode, ThinkingBlock } from '../../shared/types.js';
+import type { SafetyMode, ThinkingBlock, SteerEntry } from '../../shared/types.js';
 import { useSessionStore } from './sessionStore.js';
 import { appendTextToSegments, retractTextFromSegments } from './segment-helpers.js';
 import { createBatchScheduler, type BatchScheduler } from '../lib/event-throttle.js';
@@ -73,6 +73,12 @@ interface AgentStore {
   error: string | null;
   // Context usage from the last API finish event
   contextUsage: { usedTokens: number; totalTokens: number; percentage: number } | null;
+  // Phase 3: queued steer messages the user typed mid-run, keyed by session.
+  // Shown as pending `❯` prompts (not normal message bubbles) until the loop
+  // drains them (agent:steer-consumed) or the run ends - then they move into
+  // the message list. Per-session so a background run's pending steers survive
+  // a session switch and reappear when the user switches back.
+  pendingSteersBySession: Record<string, SteerEntry[]>;
 
   // Actions
   startRun: (params: {
@@ -83,6 +89,20 @@ interface AgentStore {
     attachments?: AgentAttachmentInput[];
   }) => Promise<void>;
   cancelRun: (sessionId: string) => Promise<void>;
+  // Phase 3: enqueue a steer message typed mid-run to redirect the task. The
+  // message is persisted by the IPC handler and drained by the loop before the
+  // next streamText round. Held in pendingSteers (NOT the message list) until
+  // the loop drains it (consumeSteers via agent:steer-consumed) or the run ends
+  // (flushPendingSteers), so it shows as a queued `❯` prompt instead of looking
+  // like a message that was already sent.
+  steerMessage: (sessionId: string, message: string) => Promise<void>;
+  // Phase 3: move the given consumed steers from pending into the message list
+  // (only when viewing the session; otherwise the DB copy loads on switch-back).
+  consumeSteers: (sessionId: string, msgIds: string[]) => void;
+  // Phase 3: move ALL remaining pending steers into the message list. Called on
+  // run end (complete/error/cancel) so unconsumed steers become normal messages
+  // (they were already persisted; the next run sees them as history).
+  flushPendingSteers: (sessionId: string) => void;
   respondAuth: (
     toolCallId: string,
     approved: boolean,
@@ -96,6 +116,12 @@ interface AgentStore {
     stopRequested?: boolean,
   ) => Promise<void>;
   reset: () => void;
+  // Clear the turn-scoped UI state (turnSegments / toolCards / pendingAuths)
+  // WITHOUT touching isRunning / runningSessionId. Called on session switch so
+  // the newly-selected session's view is clean - the previous session's run
+  // keeps streaming in the background, but its live-turn overlay no longer
+  // shows in the now-current session's message list (issues 3 & 5).
+  clearTurn: () => void;
   clearError: () => void;
 }
 
@@ -105,6 +131,10 @@ let unsubscribers: Array<() => void> = [];
 // (a separate store action) can flush pending text before capturing partial
 // output. Null when no run is active.
 let textScheduler: BatchScheduler<string> | null = null;
+// Monotonic counter for steer msgIds so two steers sent in the same millisecond
+// still get distinct ids (the pending queue and the steer-consumed event match
+// on msgId).
+let steerIdCounter = 0;
 // Flush any pending coalesced text into turnSegments. No-op when no scheduler.
 function flushPendingText(): void {
   textScheduler?.dispose();
@@ -154,6 +184,17 @@ function extractFromSegments(segments: TurnSegment[]): {
   return { text, thinkingBlocks };
 }
 
+// Whether the user is currently viewing the given session. IPC events for a
+// background run (session A) must NOT mutate shared sessionStore state when the
+// user has switched to session B - that was the root cause of the cross-session
+// task-list leak (issue 3) and the message/auth leak into the wrong view
+// (issue 5). Streaming-only state (turnSegments/toolCards) is hidden via
+// showLiveTurn, but todos/messages/contextUsage write directly to sessionStore
+// and so must be gated here.
+function isViewingSession(sessionId: string): boolean {
+  return useSessionStore.getState().currentSession?.id === sessionId;
+}
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
   isRunning: false,
   runningSessionId: null,
@@ -162,6 +203,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   pendingAuths: [],
   error: null,
   contextUsage: null,
+  pendingSteersBySession: {},
 
   startRun: async (params) => {
     set({
@@ -327,6 +369,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     unsubscribers.push(
       window.opsAgent.agent.onComplete((event) => {
         if (event.sessionId !== params.sessionId) return;
+        const viewing = isViewingSession(params.sessionId);
         // Flush any coalesced text still pending in the scheduler so the
         // extract below sees the full streamed text (the authoritative
         // finalMessage is preferred, but streamedText is the fallback).
@@ -337,7 +380,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         // (authoritative - includes nudge/error separators not always streamed).
         const { text: streamedText, thinkingBlocks } = extractFromSegments(get().turnSegments);
         const content = event.finalMessage || streamedText;
-        if (content) {
+        // Only add to the viewed session's message list. The backend already
+        // persisted the assistant message, so a background run's completion
+        // must not inject its message into the session the user switched to
+        // (issue 5 variant). Switching back loads it from the DB.
+        if (content && viewing) {
           useSessionStore.getState().addMessage({
             id: `msg-assistant-${Date.now()}`,
             sessionId: params.sessionId,
@@ -347,6 +394,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             createdAt: new Date().toISOString(),
           });
         }
+        // Phase 3: any steers still pending (arrived after the loop's final
+        // drain) were never fed to the model this run. They are already in the
+        // DB, so flush them into the message list as normal user messages -
+        // they become the latest user turn for the next run.
+        get().flushPendingSteers(params.sessionId);
         set({ isRunning: false, runningSessionId: null, turnSegments: [], toolCards: [] });
         for (const unsub of unsubscribers) unsub();
         unsubscribers = [];
@@ -354,24 +406,31 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         // Auto-name session from first user message if untitled.
         // Fires after UI cleanup so the screen updates immediately.
         // Simple truncation — no AI involvement (reliable, always works).
-        void autoNameSession(params.sessionId, params.userMessage);
+        void (viewing && autoNameSession(params.sessionId, params.userMessage));
       }),
     );
 
     unsubscribers.push(
       window.opsAgent.agent.onError((event) => {
         if (event.sessionId !== params.sessionId) return;
+        const viewing = isViewingSession(params.sessionId);
         // Flush pending text before clearing so it isn't re-injected into the
         // cleared turnSegments by the dispose in the teardown loop.
         flushPendingText();
-        // Add error as a system message so it's visible in the chat history
-        useSessionStore.getState().addMessage({
-          id: `msg-error-${Date.now()}`,
-          sessionId: params.sessionId,
-          role: 'system',
-          content: `[错误] ${event.message}`,
-          createdAt: new Date().toISOString(),
-        });
+        // Only add the error message to the viewed session's list. The backend
+        // records the failure; a background run's error must not surface in the
+        // session the user switched to.
+        if (viewing) {
+          useSessionStore.getState().addMessage({
+            id: `msg-error-${Date.now()}`,
+            sessionId: params.sessionId,
+            role: 'system',
+            content: `[错误] ${event.message}`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        // Phase 3: flush unconsumed pending steers (see onComplete).
+        get().flushPendingSteers(params.sessionId);
         set({
           isRunning: false,
           runningSessionId: null,
@@ -387,6 +446,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     unsubscribers.push(
       window.opsAgent.agent.onTodosUpdate((event) => {
         if (event.sessionId !== params.sessionId) return;
+        // Do not overwrite the viewed session's todos with a background run's
+        // task list (issue 3). The backend persists todos per-session; the
+        // user sees them when they switch back (selectSession -> loadTodos).
+        if (!isViewingSession(params.sessionId)) return;
         useSessionStore.getState().setTodos(event.todos);
       }),
     );
@@ -394,6 +457,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     unsubscribers.push(
       window.opsAgent.agent.onContextUsage((event) => {
         if (event.sessionId !== params.sessionId) return;
+        if (!isViewingSession(params.sessionId)) return;
         set({
           contextUsage: {
             usedTokens: event.usedTokens,
@@ -401,6 +465,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             percentage: event.percentage,
           },
         });
+      }),
+    );
+
+    // Phase 3: when the loop drains queued steers (feeds them to the model),
+    // move them from the pending queue into the message list so they appear as
+    // normal user bubbles right before the model's response to them.
+    unsubscribers.push(
+      window.opsAgent.agent.onSteerConsumed((event) => {
+        if (event.sessionId !== params.sessionId) return;
+        get().consumeSteers(params.sessionId, event.msgIds);
       }),
     );
 
@@ -449,7 +523,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // is a no-op for already-saved text because turnSegments is reset.
     // Flush pending coalesced text first so the captured partial includes it.
     flushPendingText();
-    const { text: partialText, thinkingBlocks } = extractFromSegments(get().turnSegments);
+    // Only capture partial text when this session is the one actually running.
+    // If the user clicks Stop while viewing a session that isn't running (a
+    // background run is in another session), turnSegments may hold the other
+    // session's streamed text - saving it here would leak it into this
+    // session's message list.
+    const isRunningThisSession = get().runningSessionId === sessionId;
+    const { text: partialText, thinkingBlocks } = isRunningThisSession
+      ? extractFromSegments(get().turnSegments)
+      : { text: '', thinkingBlocks: [] };
     if (partialText) {
       useSessionStore.getState().addMessage({
         id: `msg-assistant-${Date.now()}`,
@@ -460,13 +542,97 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         createdAt: new Date().toISOString(),
       });
     }
-    set({ isRunning: false, runningSessionId: null, turnSegments: [], toolCards: [] });
+    // Phase 3: flush unconsumed pending steers (see onComplete). Uses the
+    // sessionId passed in (the running session per onCancel wiring).
+    get().flushPendingSteers(sessionId);
+    set({
+      isRunning: false,
+      runningSessionId: null,
+      turnSegments: [],
+      toolCards: [],
+      // Clear pending authorization requests so the AuthDialog closes when the
+      // user clicks Stop. Without this, a visible approval dialog lingers after
+      // cancel and responding to it resolves an orphaned (already-aborted) loop.
+      pendingAuths: [],
+    });
     for (const unsub of unsubscribers) unsub();
     unsubscribers = [];
     try {
       await window.opsAgent.agent.cancel(sessionId);
     } catch {
       // best-effort — the loop may already be gone
+    }
+  },
+
+  steerMessage: async (sessionId, message) => {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    // Queue the steer as pending (shown as a `❯` prompt, NOT a normal message
+    // bubble yet). The IPC handler persists it to the DB immediately; the loop
+    // drains the queue and injects it before the next round, at which point
+    // agent:steer-consumed fires and consumeSteers moves it into the message
+    // list. The renderer-assigned msgId flows back via that event so we match
+    // the exact pending entry.
+    const msgId = `msg-user-steer-${Date.now()}-${++steerIdCounter}`;
+    const entry: SteerEntry = { msgId, text: trimmed };
+    set({
+      pendingSteersBySession: {
+        ...get().pendingSteersBySession,
+        [sessionId]: [...(get().pendingSteersBySession[sessionId] ?? []), entry],
+      },
+    });
+    try {
+      await window.opsAgent.agent.steer(sessionId, trimmed, msgId);
+    } catch {
+      // best-effort - the loop may have just ended; the message is still
+      // persisted and will be picked up as the latest user turn next run.
+    }
+  },
+
+  consumeSteers: (sessionId, msgIds) => {
+    const pending = get().pendingSteersBySession[sessionId] ?? [];
+    if (pending.length === 0) return;
+    const consumedSet = new Set(msgIds);
+    const consumed = pending.filter((s) => consumedSet.has(s.msgId));
+    const remaining = pending.filter((s) => !consumedSet.has(s.msgId));
+    set({
+      pendingSteersBySession: { ...get().pendingSteersBySession, [sessionId]: remaining },
+    });
+    if (consumed.length === 0) return;
+    // Only add to the viewed session's message list. A background run's consumed
+    // steers are already in the DB; switching back loads them (no cross-session
+    // leak into the currently-viewed session's list - issues 3 & 5 pattern).
+    if (isViewingSession(sessionId)) {
+      for (const s of consumed) {
+        useSessionStore.getState().addMessage({
+          id: s.msgId,
+          sessionId,
+          role: 'user',
+          content: s.text,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
+  },
+
+  flushPendingSteers: (sessionId) => {
+    const pending = get().pendingSteersBySession[sessionId] ?? [];
+    if (pending.length === 0) return;
+    set({
+      pendingSteersBySession: { ...get().pendingSteersBySession, [sessionId]: [] },
+    });
+    // Only add to the viewed session's message list (see consumeSteers). If not
+    // viewing, the steers are already in the DB and load on switch-back.
+    if (isViewingSession(sessionId)) {
+      for (const s of pending) {
+        useSessionStore.getState().addMessage({
+          id: s.msgId,
+          sessionId,
+          role: 'user',
+          content: s.text,
+          createdAt: new Date().toISOString(),
+        });
+      }
     }
   },
 
@@ -507,9 +673,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       pendingAuths: [],
       error: null,
       contextUsage: null,
+      pendingSteersBySession: {},
     });
     for (const unsub of unsubscribers) unsub();
     unsubscribers = [];
+  },
+
+  clearTurn: () => {
+    // Clear the turn-scoped live-turn UI state WITHOUT touching isRunning /
+    // runningSessionId (a background run keeps streaming) and WITHOUT touching
+    // pendingAuths (an authorization request is a one-shot event - if the user
+    // switches away and back, the AuthDialog must still be there so they can
+    // approve; clearing it here would orphan the backend's pending promise
+    // until its 5-min timeout). Called on session switch (selectSession) so the
+    // now-current session's message list is clean instead of showing the
+    // previous session's live-turn overlay (issues 3 & 5).
+    set({
+      turnSegments: [],
+      toolCards: [],
+    });
   },
 
   clearError: () => set({ error: null }),

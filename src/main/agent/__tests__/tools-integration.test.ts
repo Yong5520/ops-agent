@@ -121,6 +121,7 @@ const testHost: HostConfig = {
   groupName: 'default',
   timeoutMs: 30000,
   agentForward: false,
+  deviceType: 'linux',
   createdAt: '2026-01-01',
   updatedAt: '2026-01-01',
 };

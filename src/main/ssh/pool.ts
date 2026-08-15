@@ -101,6 +101,8 @@ export class ConnectionPool extends EventEmitter {
       jumpHostId: host.jumpHostId,
       agentForward: host.agentForward,
       hostKeyFingerprint: host.hostKeyFingerprint,
+      // deviceType changes the exec profile (PTY vs no-PTY) -> force reconnect.
+      deviceType: host.deviceType,
     });
 
     // V3-09.1/M2: in encoded mode the SSH connection terminates at the BASTION,

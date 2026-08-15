@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { Message } from '../../../shared/types.js';
+import type { Message, SteerEntry } from '../../../shared/types.js';
 import type { ToolCallCard, TurnSegment, ThinkingTurnSegment } from '../../store/agentStore.js';
 import { CommandCard } from '../../components/CommandCard.js';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer.js';
@@ -23,6 +23,9 @@ interface MessageListProps {
   // instead of the old run's streaming state overlaid (Issue 3 fix).
   runningSessionId?: string | null;
   currentSessionId?: string;
+  // Phase 3: queued steer messages typed mid-run. Shown as pending `❯` prompts
+  // (not normal bubbles) below the live turn until the model drains them.
+  pendingSteers?: SteerEntry[];
   onEditMessage?: (message: Message) => void;
 }
 
@@ -257,6 +260,7 @@ export function MessageList({
   isRunning,
   runningSessionId,
   currentSessionId,
+  pendingSteers,
   onEditMessage,
 }: MessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -301,17 +305,18 @@ export function MessageList({
     return () => {
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     };
-  }, [messages, turnSegments, toolCards]);
+  }, [messages, turnSegments, toolCards, pendingSteers]);
 
   const items = virtualizer.getVirtualItems();
   const liveItems = buildLiveRenderItems(turnSegments, toolCards);
-  // Only show the live-turn overlay for the session that is actually running.
-  // If the user switched to a different session mid-run, show that session's
-  // persisted messages cleanly (the old run keeps streaming in the background
-  // but its state is scoped out of view). Also gate on the running session
-  // being the current one so the overlay doesn't linger after a switch.
+  // Only show the live-turn overlay for the session that is actually running
+  // AND is the one the user is currently viewing. selectSession calls
+  // clearTurn() on switch, so turnSegments no longer holds the previous
+  // session's streamed content - the `|| turnSegments.length > 0` fallback
+  // that used to be here re-introduced that stale content into the newly
+  // selected session's view (issue 5).
   const isRunningThisSession = isRunning && runningSessionId === currentSessionId;
-  const showLiveTurn = isRunningThisSession || turnSegments.length > 0;
+  const showLiveTurn = isRunningThisSession;
   const lastItem = liveItems[liveItems.length - 1];
 
   return (
@@ -388,6 +393,25 @@ export function MessageList({
               <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-500" />
             </span>
             AI 思考中...
+          </div>
+        )}
+
+        {/* Phase 3: queued steer messages (pending, not yet fed to the model).
+            Shown below the live turn as `❯` prompts so it is clear they will be
+            delivered on the next round, not that they were already sent. */}
+        {pendingSteers && pendingSteers.length > 0 && (
+          <div className="flex flex-col gap-2 pt-3">
+            {pendingSteers.map((s) => (
+              <div key={s.msgId} className="flex justify-end">
+                <div className="max-w-[85%] rounded-lg rounded-br-sm border border-blue-800/50 bg-blue-950/20 px-4 py-2 opacity-80">
+                  <div className="mb-1 flex items-center gap-1.5 text-xs text-blue-400/80">
+                    <span className="select-none">❯</span>
+                    <span>排队中 · 下一轮反馈给模型</span>
+                  </div>
+                  <div className="whitespace-pre-wrap text-sm text-zinc-300">{s.text}</div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 

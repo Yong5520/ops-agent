@@ -75,6 +75,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   selectSession: async (id) => {
     const session = get().sessions.find((s) => s.id === id);
     if (!session) return;
+    // Clear the previous session's turn-scoped UI state (live-turn overlay,
+    // tool cards, pending auths) so the now-selected session renders cleanly.
+    // Does NOT touch isRunning/runningSessionId - a background run in the
+    // previous session keeps streaming (issues 3 & 5).
+    useAgentStore.getState().clearTurn();
     const messages = await window.opsAgent.sessions.messages(id);
     set({
       currentSession: session,

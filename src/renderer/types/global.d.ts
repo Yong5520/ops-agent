@@ -175,6 +175,11 @@ interface AgentContextUsageEvent {
   percentage: number;
 }
 
+interface AgentSteerConsumedEvent {
+  sessionId: string;
+  msgIds: string[];
+}
+
 interface AgentCompactResult {
   ok: boolean;
   reason?: 'too_few_messages' | 'no_model';
@@ -240,6 +245,22 @@ interface SftpDirEntry {
   isDirectory: boolean;
   size: number;
   modifyTime: number;
+}
+
+// A local serial port, as reported by serialport's SerialPort.list().
+interface SerialPortInfo {
+  path: string; // e.g. 'COM3' / '/dev/ttyUSB0'
+  manufacturer?: string;
+  serialNumber?: string;
+  friendlyName?: string;
+}
+
+// A local serial port, as reported by serialport's SerialPort.list().
+interface SerialPortInfo {
+  path: string; // e.g. 'COM3' / '/dev/ttyUSB0'
+  manufacturer?: string;
+  serialNumber?: string;
+  friendlyName?: string;
 }
 
 interface SftpProgressEvent {
@@ -320,6 +341,7 @@ interface OpsAgentApi {
     deleteGroup: (groupName: string) => Promise<number>;
     listGroups: () => Promise<string[]>;
     createGroup: (name: string) => Promise<string>;
+    clearHostKey: (id: string) => Promise<HostConfig | null>;
   };
   models: {
     list: () => Promise<ModelProvider[]>;
@@ -406,6 +428,8 @@ interface OpsAgentApi {
   agent: {
     run: (request: AgentRunRequest) => Promise<void>;
     cancel: (sessionId: string) => Promise<void>;
+    /** Phase 3: enqueue a steer message typed mid-run to redirect the task. */
+    steer: (sessionId: string, message: string, msgId: string) => Promise<void>;
     /** V3-07 Cycle C: stop a single in-flight tool command by toolCallId. */
     stopTool: (toolCallId: string) => Promise<{ stopped: boolean }>;
     compact: (sessionId: string, instructions?: string) => Promise<AgentCompactResult>;
@@ -430,6 +454,7 @@ interface OpsAgentApi {
     onModeChange: (handler: (event: AgentModeChangeEvent) => void) => () => void;
     onAskUserRequest: (handler: (event: AgentAskUserRequestEvent) => void) => () => void;
     onContextUsage: (handler: (event: AgentContextUsageEvent) => void) => () => void;
+    onSteerConsumed: (handler: (event: AgentSteerConsumedEvent) => void) => () => void;
   };
   tasks: {
     list: (sessionId: string) => Promise<TodoItem[]>;
@@ -444,6 +469,7 @@ interface OpsAgentApi {
     input: (sessionId: string, data: string) => Promise<void>;
     resize: (sessionId: string, cols: number, rows: number) => Promise<void>;
     kill: (sessionId: string) => Promise<void>;
+    openWindow: (hostId: string) => Promise<{ ok: boolean }>;
     onData: (handler: (sessionId: string, data: string) => void) => () => void;
     onExit: (
       handler: (sessionId: string, info: { hostName: string; reason: string }) => void,
@@ -451,6 +477,13 @@ interface OpsAgentApi {
     onReconnect: (
       handler: (sessionId: string, info: { hostName: string; attempt: number }) => void,
     ) => () => void;
+  };
+  serial: {
+    /** Enumerate local serial ports for the host-config picker. */
+    listPorts: () => Promise<SerialPortInfo[]>;
+    /** Immediately release the port held by the serial pool for this host
+     * (also ends any active terminal session on it). */
+    releasePort: (hostId: string) => Promise<{ ok: boolean }>;
   };
   sftp: {
     list: (hostId: string, remotePath: string) => Promise<SftpDirEntry[]>;

@@ -66,14 +66,43 @@ describe('buildSystemPrompt: task list resume injection', () => {
     expect(dynamicSuffix).toContain('[ ] 待办: 修复配置');
   });
 
-  it('adds a resume directive when there are incomplete steps', () => {
+  it('adds a resume directive when there are incomplete steps and the user asks to continue', () => {
+    const { dynamicSuffix } = buildSystemPrompt({
+      selectedHostIds: [],
+      safetyMode: 'operator',
+      todos: mixedTodos,
+      userRequestsContinuation: true,
+    });
+    expect(dynamicSuffix).toMatch(/不要重新创建任务列表/);
+    expect(dynamicSuffix).toMatch(/续做|继续执行/);
+  });
+
+  it('V3-10: softens the directive (no auto-resume) when the user did NOT ask to continue', () => {
+    // The 2026-08-11 nginx incident: user asked "以上动作不影响用户的请求吧"
+    // (a question). isContinuationRequest returns false, so loop.ts passes
+    // userRequestsContinuation: false. The directive must NOT tell the model
+    // to continue executing; it must tell it to answer the question with text.
+    const { dynamicSuffix } = buildSystemPrompt({
+      selectedHostIds: [],
+      safetyMode: 'operator',
+      todos: mixedTodos,
+      userRequestsContinuation: false,
+    });
+    expect(dynamicSuffix).toMatch(/提问或求证/);
+    expect(dynamicSuffix).toMatch(/仅用文本回答/);
+    // Must NOT contain the strong "continue executing" wording.
+    expect(dynamicSuffix).not.toMatch(/请从第一个未完成.*继续执行/);
+  });
+
+  it('V3-10: defaults to the softened directive when userRequestsContinuation is omitted', () => {
+    // Conservative default: when loop.ts doesn't pass the flag, don't auto-
+    // resume. Prevents any caller from accidentally triggering continuation.
     const { dynamicSuffix } = buildSystemPrompt({
       selectedHostIds: [],
       safetyMode: 'operator',
       todos: mixedTodos,
     });
-    expect(dynamicSuffix).toMatch(/不要重新创建任务列表/);
-    expect(dynamicSuffix).toMatch(/续做|继续执行/);
+    expect(dynamicSuffix).toMatch(/提问或求证/);
   });
 
   it('does NOT add the resume directive when all steps are completed', () => {
@@ -141,5 +170,21 @@ describe('buildSystemPrompt: host facts framing + scope adherence', () => {
     });
     expect(staticPrefix).toMatch(/未经用户明确要求/);
     expect(staticPrefix).toMatch(/不.*延伸|不得.*展开调查/);
+  });
+
+  // V3-10: the question/confirmation rule is the primary prompt-level fix for
+  // the nginx incident. The model must not call write tools when the user is
+  // asking a question, even if a plan was previously proposed.
+  it('V3-10: includes a question/confirmation rule forbidding writes on questions', () => {
+    const { staticPrefix } = buildSystemPrompt({
+      selectedHostIds: [],
+      safetyMode: 'operator',
+    });
+    expect(staticPrefix).toContain('提问/确认类');
+    expect(staticPrefix).toMatch(/不得.*自行开始执行|不得据此自行开始执行/);
+    // Must name the tools it forbids.
+    expect(staticPrefix).toMatch(/exec.*sudo_exec.*write_file|不得调用.*exec/);
+    // Must require an explicit execute instruction.
+    expect(staticPrefix).toMatch(/明确下达执行指令|明确表示/);
   });
 });

@@ -41,7 +41,7 @@ export function initDatabase(): DB {
 
 function runMigrations(database: DB): void {
   const currentVersion = getUserVersion(database);
-  const targetVersion = 15;
+  const targetVersion = 17;
 
   if (currentVersion < 1) {
     logger.info(`Running migration v1: initial schema`);
@@ -277,6 +277,34 @@ function runMigrations(database: DB): void {
     // so existing chain integrity is unaffected. Idempotent.
     logger.info(`Running migration v15: audit_logs.edited_by_user column`);
     addColumnIfNotExists(database, 'audit_logs', 'edited_by_user', 'INTEGER NOT NULL DEFAULT 0');
+  }
+
+  if (currentVersion < 16) {
+    // Network-device pager handling: tag each host with its device type so the
+    // SSH executor can pick the right exec profile (PTY for paginating
+    // network-device CLIs like Huawei VRP / Cisco / H3C, no-PTY for Linux).
+    // Existing hosts default to 'linux' so behavior is unchanged until the user
+    // picks a switch/router type. Additive, idempotent.
+    logger.info(`Running migration v16: hosts.device_type column`);
+    addColumnIfNotExists(database, 'hosts', 'device_type', "TEXT NOT NULL DEFAULT 'linux'");
+  }
+
+  if (currentVersion < 17) {
+    // Serial console support: hosts can connect via a local serial port
+    // (switch initialization over a console cable) instead of SSH. connection_
+    // type defaults to 'ssh' so existing hosts are unaffected; the serial
+    // parameter columns are nullable (absent = default 9600 8N1 no flow
+    // control, resolved in src/main/serial/serial-options.ts). Additive,
+    // idempotent.
+    logger.info(`Running migration v17: hosts serial-console columns`);
+    addColumnIfNotExists(database, 'hosts', 'connection_type', "TEXT NOT NULL DEFAULT 'ssh'");
+    addColumnIfNotExists(database, 'hosts', 'serial_port', 'TEXT');
+    addColumnIfNotExists(database, 'hosts', 'baud_rate', 'INTEGER');
+    addColumnIfNotExists(database, 'hosts', 'data_bits', 'INTEGER');
+    addColumnIfNotExists(database, 'hosts', 'stop_bits', 'INTEGER');
+    addColumnIfNotExists(database, 'hosts', 'parity', 'TEXT');
+    addColumnIfNotExists(database, 'hosts', 'flow_control', 'TEXT');
+    addColumnIfNotExists(database, 'hosts', 'login_required', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   setUserVersion(database, targetVersion);

@@ -8,6 +8,34 @@ export type AuthorizationStatus = 'auto' | 'approved' | 'rejected' | 'blocked';
 export type AuthType = 'password' | 'key';
 export type ModelProviderType = 'anthropic' | 'openai' | 'openai-compatible';
 
+// Device type of a host. Determines how the SSH executor runs commands:
+// network-device CLIs paginate and need a PTY so the pager receives the Space
+// key that auto-advances output; Linux/generic hosts use the no-PTY exec path.
+// See src/main/ssh/device-profiles.ts.
+export type DeviceType =
+  'linux' | 'huawei-vrp' | 'cisco-ios' | 'h3c' | 'juniper-junos' | 'arista-eos' | 'generic';
+
+// How OpsAgent connects to a host. 'ssh' (default) = network SSH as before;
+// 'serial' = local serial console (COM port / USB-to-serial adapter), used for
+// device initialization work like a fresh switch's console port. See
+// src/main/serial/.
+export type ConnectionType = 'ssh' | 'serial';
+
+// Serial line parameters. flowControl is a UI-level enum resolved to the
+// rtscts/xon/xoff flags serialport expects (src/main/serial/serial-options.ts).
+export type SerialParity = 'none' | 'even' | 'odd';
+export type SerialFlowControl = 'none' | 'rtscts' | 'xonxoff';
+
+// A queued steer message the user typed mid-run to redirect the task. The
+// renderer assigns `msgId` so the main process can report back which queued
+// steers were drained (fed to the model) via `agent:steer-consumed`, letting
+// the UI move them from the pending queue into the message list at the right
+// moment (after the current response, before the next one).
+export interface SteerEntry {
+  msgId: string;
+  text: string;
+}
+
 // ---------- Host ----------
 export interface HostConfig {
   id: string;
@@ -35,6 +63,22 @@ export interface HostConfig {
   jumpMode?: 'forward' | 'encoded';
   jumpUsernameTemplate?: string; // default {bastionUser}@{targetUser}@{targetHost}
   jumpTargetAuth?: 'bastion-managed' | 'password'; // default bastion-managed
+  // Device type: selects the exec profile (PTY for network-device CLIs that
+  // paginate, no-PTY for Linux/generic). Defaults to 'linux' for migrated hosts.
+  deviceType: DeviceType;
+  // Serial console support. connectionType is optional so every existing
+  // HostInput/HostConfig (all SSH) stays valid; undefined = 'ssh'.
+  connectionType?: ConnectionType;
+  serialPort?: string; // e.g. 'COM3' / '/dev/ttyUSB0'
+  baudRate?: number; // default 9600
+  dataBits?: 7 | 8; // default 8
+  stopBits?: 1 | 2; // default 1
+  parity?: SerialParity; // default 'none'
+  flowControl?: SerialFlowControl; // default 'none'
+  // Whether the device's console asks for username/password. When true the
+  // serial layer auto-logs in with the stored username/password; when false
+  // (e.g. a fresh switch's setup prompt) no credentials are sent.
+  loginRequired?: boolean;
   createdAt: string;
   updatedAt: string;
 }

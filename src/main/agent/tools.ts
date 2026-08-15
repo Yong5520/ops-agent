@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { tool } from 'ai';
-import { connectionPool, execCommand, sudoExecCommand, readFile, writeFile } from '../ssh/index.js';
+import { connectionPool, execCommand, readFile, writeFile } from '../ssh/index.js';
+import {
+  runHostCommand,
+  runHostSudoCommand,
+  invalidateHostConnection,
+  hostCommandSucceeded,
+  isSerialHost,
+} from './host-command.js';
 import { hostsStore } from '../storage/hosts.js';
 import { auditStore } from '../storage/audit.js';
 import { hooksStore } from '../storage/hooks.js';
@@ -463,15 +470,10 @@ export function createTools(deps: ToolFactoryDeps) {
     const abortController = new AbortController();
     registerRunningCommand(toolCallId, abortController);
     try {
-      const manager = await connectionPool.get(host.id);
-      // V3-07: forward the onStream callback so ops tools (tail_log,
-      // search_logs, journal_query, ...) emit incremental partial:true
-      // onToolResult chunks - same pattern as exec/sudo_exec (see ~line 549).
-      // Without this, a `tail -f` or long grep blocks until the host timeout
-      // with nothing shown to the user. Each chunk appends to the existing
-      // card's output in the renderer.
-      const result = await execCommand(
-        manager,
+      // V3-11: runHostCommand branches on connectionType so read-ops work over
+      // serial consoles too (expect-style exec on the device CLI).
+      const result = await runHostCommand(
+        host,
         command,
         (chunk) => {
           onToolResult({
@@ -486,7 +488,7 @@ export function createTools(deps: ToolFactoryDeps) {
         },
         abortController.signal,
       );
-      const success = result.exitCode === 0;
+      const success = hostCommandSucceeded(host, result);
 
       // PostToolUse hooks (P1-3 fix: was missing for execReadTool)
       const postResult = await executePostToolUseHooks(
@@ -632,12 +634,14 @@ export function createTools(deps: ToolFactoryDeps) {
             : await guard.acquireWrite(host.id);
 
         try {
-          const manager = await connectionPool.get(host.id);
+          // V3-11: serial hosts have no SSH manager / Linux fs; backup (cp)
+          // is SSH-only. runHostCommand branches on connectionType for exec.
+          const manager = isSerialHost(host) ? null : await connectionPool.get(host.id);
 
           // Backup files before executing — only if the user checked
           // "backup before modification" in the AuthDialog and the AI
           // provided backup_paths.
-          if (pre.backup && backup_paths && backup_paths.length > 0) {
+          if (manager && pre.backup && backup_paths && backup_paths.length > 0) {
             for (const bp of backup_paths) {
               const backupPath = `${bp}.opsagent-bak-${Date.now()}`;
               try {
@@ -662,7 +666,7 @@ export function createTools(deps: ToolFactoryDeps) {
           // to the existing card's output instead of replacing.
           const result = await withRetry(
             () =>
-              execCommand(manager, effectiveCommand, (chunk) => {
+              runHostCommand(host, effectiveCommand, (chunk) => {
                 hasStreamedOutput = true;
                 onToolResult({
                   toolCallId,
@@ -676,7 +680,7 @@ export function createTools(deps: ToolFactoryDeps) {
               }),
             { maxRetries: 2, delays: [1000, 2000], hasSideEffects: () => hasStreamedOutput },
           );
-          const success = result.exitCode === 0;
+          const success = hostCommandSucceeded(host, result);
 
           // PostToolUse hooks - append additionalContext to stdout
           const postResult = await executePostToolUseHooks(
@@ -753,7 +757,7 @@ export function createTools(deps: ToolFactoryDeps) {
           // socket is alive. This forces a fresh connection on next call.
           if (isConnectionError(err as Error)) {
             logger.warn(`[Tool] Connection error on exec, invalidating: ${(err as Error).message}`);
-            connectionPool.invalidate(host.id);
+            invalidateHostConnection(host);
           }
           onToolResult({
             toolCallId,
@@ -953,8 +957,7 @@ export function createTools(deps: ToolFactoryDeps) {
             }
             const release = await guard.acquireRead();
             try {
-              const manager = await connectionPool.get(h.id);
-              const result = await execCommand(manager, sanitized, (chunk) => {
+              const result = await runHostCommand(h, sanitized, (chunk) => {
                 onToolResult({
                   toolCallId: perHostId,
                   toolName: 'exec_multi',
@@ -965,7 +968,7 @@ export function createTools(deps: ToolFactoryDeps) {
                   partial: true,
                 });
               });
-              const success = result.exitCode === 0;
+              const success = hostCommandSucceeded(h, result);
               onToolResult({
                 toolCallId: perHostId,
                 toolName: 'exec_multi',
@@ -1001,7 +1004,7 @@ export function createTools(deps: ToolFactoryDeps) {
             } catch (err) {
               const errMsg = formatSshError(err as Error, h.name);
               if (isConnectionError(err as Error)) {
-                connectionPool.invalidate(h.id);
+                invalidateHostConnection(h);
               }
               onToolResult({
                 toolCallId: `${toolCallId}__${h.name}`,
@@ -1132,11 +1135,13 @@ export function createTools(deps: ToolFactoryDeps) {
             : await guard.acquireWrite(host.id);
 
         try {
-          const manager = await connectionPool.get(host.id);
+          // V3-11: serial hosts have no SSH manager / Linux fs; backup (cp)
+          // is SSH-only. runHostSudoCommand branches on connectionType.
+          const manager = isSerialHost(host) ? null : await connectionPool.get(host.id);
 
           // Backup files before executing — only if the user checked
           // "backup before modification" in the AuthDialog.
-          if (pre.backup && backup_paths && backup_paths.length > 0) {
+          if (manager && pre.backup && backup_paths && backup_paths.length > 0) {
             for (const bp of backup_paths) {
               const backupPath = `${bp}.opsagent-bak-${Date.now()}`;
               try {
@@ -1156,7 +1161,7 @@ export function createTools(deps: ToolFactoryDeps) {
           let hasStreamedOutput = false;
           const result = await withRetry(
             () =>
-              sudoExecCommand(manager, effectiveCommand, (chunk) => {
+              runHostSudoCommand(host, effectiveCommand, (chunk) => {
                 hasStreamedOutput = true;
                 onToolResult({
                   toolCallId,
@@ -1170,7 +1175,7 @@ export function createTools(deps: ToolFactoryDeps) {
               }),
             { maxRetries: 2, delays: [1000, 2000], hasSideEffects: () => hasStreamedOutput },
           );
-          const success = result.exitCode === 0;
+          const success = hostCommandSucceeded(host, result);
 
           // PostToolUse hooks - append additionalContext to stdout
           const postResult = await executePostToolUseHooks(
@@ -1245,7 +1250,7 @@ export function createTools(deps: ToolFactoryDeps) {
             logger.warn(
               `[Tool] Connection error on sudo_exec, invalidating: ${(err as Error).message}`,
             );
-            connectionPool.invalidate(host.id);
+            invalidateHostConnection(host);
           }
           onToolResult({
             toolCallId,
@@ -1286,6 +1291,19 @@ export function createTools(deps: ToolFactoryDeps) {
       execute: async ({ host: hostName, path, offset, limit }) => {
         const toolCallId = `read-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const { host } = resolveHost(hostName);
+
+        // V3-11: read_file uses SFTP (SSH-only). Serial console devices have
+        // no filesystem path semantics - use exec with the device CLI instead.
+        if (isSerialHost(host)) {
+          onToolResult({
+            toolCallId,
+            toolName: 'read_file',
+            success: false,
+            stderr: '串口主机不支持 read_file（无文件系统），请使用 exec 执行设备 CLI 命令',
+            authorization: 'auto',
+          });
+          return { error: '串口主机不支持 read_file' };
+        }
 
         // read_file is always READ — no authorization needed, but still
         // notify UI for visibility.
@@ -1356,6 +1374,19 @@ export function createTools(deps: ToolFactoryDeps) {
       execute: async ({ host: hostName, path, content, description }) => {
         const toolCallId = `write-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const { host } = resolveHost(hostName);
+
+        // V3-11: write_file uses SFTP (SSH-only). Serial console devices have
+        // no filesystem path semantics - use exec with the device CLI instead.
+        if (isSerialHost(host)) {
+          onToolResult({
+            toolCallId,
+            toolName: 'write_file',
+            success: false,
+            stderr: '串口主机不支持 write_file（无文件系统），请使用 exec 执行设备 CLI 命令',
+            authorization: 'auto',
+          });
+          return { error: '串口主机不支持 write_file' };
+        }
 
         // write_file is always WRITE — goes through normal authorization flow.
         // Pass backupPaths so the AuthDialog can show a "backup before modification"
@@ -1496,6 +1527,18 @@ export function createTools(deps: ToolFactoryDeps) {
       execute: async ({ host: hostName, path }) => {
         const toolCallId = `rollback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const { host } = resolveHost(hostName);
+
+        // V3-11: rollback restores a Linux backup file (find/cp) - SSH-only.
+        if (isSerialHost(host)) {
+          onToolResult({
+            toolCallId,
+            toolName: 'rollback',
+            success: false,
+            stderr: '串口主机不支持 rollback（无文件系统备份）',
+            authorization: 'auto',
+          });
+          return { error: '串口主机不支持 rollback' };
+        }
 
         // rollback is always WRITE — goes through normal authorization flow
         const pre = await preExec(

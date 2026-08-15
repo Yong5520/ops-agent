@@ -56,7 +56,7 @@ function makeDb() {
 vi.mock('../database.js', () => ({ getDb: () => makeDb() }));
 vi.mock('../crypto.js', () => ({ encrypt: (v: string) => v, decrypt: (v: string) => v }));
 
-import { hostsStore } from '../hosts.js';
+import { hostsStore, hostAddressChanged } from '../hosts.js';
 import type { HostInput } from '../../../shared/types.js';
 
 beforeEach(() => {
@@ -75,6 +75,7 @@ function baseInput(overrides: Partial<HostInput> = {}): HostInput {
     groupName: 'default',
     timeoutMs: 60000,
     agentForward: false,
+    deviceType: 'linux',
     ...overrides,
   };
 }
@@ -173,6 +174,45 @@ describe('V3-09 hosts SSH fields', () => {
       expect(upd!.sql).toContain('host_key_fingerprint');
       expect(upd!.args).toMatchObject({ jumpHostId: 'bastion-1', agentForward: 1 });
     });
+
+    // V3-10: when the host address (host or port) changes, the previously
+    // recorded host_key_fingerprint is stale (it belongs to the old endpoint's
+    // server key). update() must null it out so the next connect re-runs TOFU
+    // instead of failing with "Host denied (verification failed)".
+    it('update clears hostKeyFingerprint when the host address changes', () => {
+      state.nextRow = hostRow({
+        host: '10.0.0.1',
+        port: 22,
+        host_key_fingerprint: 'SHA256:old',
+      });
+      hostsStore.update('h1', { host: '10.0.0.2' });
+      const upd = state.stmts.find((s) => s.sql.includes('UPDATE hosts'));
+      expect(upd!.args).toMatchObject({ hostKeyFingerprint: null });
+    });
+
+    it('update clears hostKeyFingerprint when the port changes', () => {
+      state.nextRow = hostRow({
+        host: '10.0.0.1',
+        port: 22,
+        host_key_fingerprint: 'SHA256:old',
+      });
+      hostsStore.update('h1', { port: 2222 });
+      const upd = state.stmts.find((s) => s.sql.includes('UPDATE hosts'));
+      expect(upd!.args).toMatchObject({ hostKeyFingerprint: null });
+    });
+
+    it('update preserves hostKeyFingerprint when host/port are unchanged', () => {
+      // Editing only the name (or other non-address field) must NOT clear the
+      // fingerprint - the endpoint's server key is still the same.
+      state.nextRow = hostRow({
+        host: '10.0.0.1',
+        port: 22,
+        host_key_fingerprint: 'SHA256:old',
+      });
+      hostsStore.update('h1', { name: 'renamed-host' });
+      const upd = state.stmts.find((s) => s.sql.includes('UPDATE hosts'));
+      expect(upd!.args).toMatchObject({ hostKeyFingerprint: 'SHA256:old' });
+    });
   });
 
   describe('rowToConfig mapping', () => {
@@ -247,6 +287,17 @@ describe('V3-09 hosts SSH fields', () => {
       // records the first positional arg.
       expect(upd!.args).toBe('SHA256:captured');
     });
+
+    it('clears the fingerprint when passed null (V3-10 clear-host-key UI)', () => {
+      // Passing null lets the Settings "清除主机密钥" button reset a stale
+      // fingerprint so the next connect re-runs TOFU.
+      hostsStore.setHostKeyFingerprint('h1', null);
+      const upd = state.stmts.find(
+        (s) => s.sql.includes('UPDATE hosts') && s.sql.includes('host_key_fingerprint'),
+      );
+      expect(upd).toBeDefined();
+      expect(upd!.args).toBeNull();
+    });
   });
 
   // ── V3-09.1: encoded-bastion columns ──────────────────────────────────
@@ -318,5 +369,101 @@ describe('V3-09 hosts SSH fields', () => {
       expect(host?.jumpTargetAuth).toBe('bastion-managed');
       expect(host?.jumpUsernameTemplate).toBeUndefined();
     });
+  });
+
+  // ── Phase 2: device_type column ──────────────────────────────────────
+  describe('Phase 2 device_type field', () => {
+    beforeEach(() => {
+      state.nextRow = {
+        id: 'h1',
+        name: 'web-1',
+        host: '10.0.0.1',
+        port: 22,
+        username: 'root',
+        auth_type: 'password',
+        password: null,
+        key_path: null,
+        sudo_password: null,
+        su_password: null,
+        group_name: 'default',
+        timeout_ms: 60000,
+        jump_host_id: null,
+        agent_forward: 0,
+        host_key_fingerprint: null,
+        jump_mode: 'forward',
+        jump_username_template: null,
+        jump_target_auth: 'bastion-managed',
+        device_type: 'linux',
+        created_at: '2026-01-01',
+        updated_at: '2026-01-01',
+      };
+    });
+
+    it('create binds device_type and includes it in the INSERT columns', () => {
+      hostsStore.create(baseInput({ deviceType: 'huawei-vrp' }));
+      const insert = state.stmts.find((s) => s.sql.includes('INSERT INTO hosts'));
+      expect(insert!.sql).toContain('device_type');
+      expect(insert!.args).toMatchObject({ deviceType: 'huawei-vrp' });
+    });
+
+    it('create defaults deviceType to linux when not set', () => {
+      hostsStore.create(baseInput({ deviceType: undefined }));
+      const insert = state.stmts.find((s) => s.sql.includes('INSERT INTO hosts'));
+      expect(insert!.args).toMatchObject({ deviceType: 'linux' });
+    });
+
+    it('update sets device_type', () => {
+      hostsStore.update('h1', { deviceType: 'cisco-ios' });
+      const upd = state.stmts.find((s) => s.sql.includes('UPDATE hosts'));
+      expect(upd!.sql).toContain('device_type');
+      expect(upd!.args).toMatchObject({ deviceType: 'cisco-ios' });
+    });
+
+    it('rowToConfig maps device_type -> deviceType', () => {
+      state.nextRow = { ...state.nextRow!, device_type: 'h3c' };
+      const host = hostsStore.get('h1');
+      expect(host?.deviceType).toBe('h3c');
+    });
+
+    it('rowToConfig defaults deviceType to linux when the column is missing (migrated row)', () => {
+      const { device_type: _drop, ...rowWithoutDeviceType } = state.nextRow!;
+      state.nextRow = rowWithoutDeviceType;
+      const host = hostsStore.get('h1');
+      expect(host?.deviceType).toBe('linux');
+    });
+  });
+});
+
+// V3-10: pure helper that drives update()'s "clear fingerprint on address
+// change" behavior. Tested directly so the logic is pinned independent of the
+// fake-DB shim.
+describe('hostAddressChanged', () => {
+  const existing = { host: '10.0.0.1', port: 22 };
+
+  it('returns true when host changes', () => {
+    expect(hostAddressChanged(existing, { host: '10.0.0.2' })).toBe(true);
+  });
+
+  it('returns true when port changes', () => {
+    expect(hostAddressChanged(existing, { port: 2222 })).toBe(true);
+  });
+
+  it('returns true when both change', () => {
+    expect(hostAddressChanged(existing, { host: '10.0.0.2', port: 2222 })).toBe(true);
+  });
+
+  it('returns false when neither host nor port is in the payload', () => {
+    // A name-only edit (or any payload without host/port) must not clear the
+    // fingerprint. Represented here as an empty payload since the helper's
+    // payload type only exposes host/port.
+    expect(hostAddressChanged(existing, {})).toBe(false);
+  });
+
+  it('returns false when host and port are the same as existing', () => {
+    expect(hostAddressChanged(existing, { host: '10.0.0.1', port: 22 })).toBe(false);
+  });
+
+  it('returns false when only the host is the same (port omitted)', () => {
+    expect(hostAddressChanged(existing, { host: '10.0.0.1' })).toBe(false);
   });
 });

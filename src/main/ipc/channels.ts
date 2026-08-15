@@ -17,6 +17,9 @@ export const Channels = {
     DELETE_GROUP: 'hosts:deleteGroup',
     LIST_GROUPS: 'hosts:listGroups',
     CREATE_GROUP: 'hosts:createGroup',
+    // V3-10: clear a stale stored host_key_fingerprint so the next connect
+    // re-runs TOFU (recover from "Host denied (verification failed)").
+    CLEAR_HOST_KEY: 'hosts:clearHostKey',
   },
   Models: {
     LIST: 'models:list',
@@ -106,6 +109,13 @@ export const Channels = {
     // V3-07 Cycle C: stop a single in-flight tool command by toolCallId
     // (e.g. a running tail -f). Bridges to runningCommands.abort.
     STOP_TOOL: 'agent:stop-tool',
+    // Phase 3: enqueue a steer message typed mid-run to redirect the task.
+    // The loop drains the queue (consumeSteerMessages) before the next round.
+    STEER: 'agent:steer',
+    // Phase 3: main -> renderer notification that queued steers were drained
+    // (fed to the model), so the UI can move them from the pending queue into
+    // the message list at the right moment.
+    STEER_CONSUMED: 'agent:steer-consumed',
     // Handler: renderer -> main (via ipcMain.handle)
     AUTHORIZATION_RESPONSE: 'agent:authorization-response',
     PLAN_APPROVAL_RESPONSE: 'agent:plan-approval-response',
@@ -120,6 +130,10 @@ export const Channels = {
   },
   Window: {
     RESTORE_FOCUS: 'window:restoreFocus',
+  },
+  Serial: {
+    // Enumerate local serial ports (COMx / ttyUSB*) for the host-config picker.
+    LIST_PORTS: 'serial:listPorts',
   },
 } as const;
 

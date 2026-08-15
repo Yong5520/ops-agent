@@ -2,6 +2,9 @@ import { OpsAgentError } from './connection.js';
 import type { SSHConnectionManager } from './connection.js';
 import { escapeCommandForShell } from '../security/engine.js';
 import type { ExecResult, ExecStreamCallback } from './types.js';
+import type { ClientChannel } from 'ssh2';
+import { createPagerAdvancer, stripPagerArtifacts, stripAnsi, PAGER_ADVANCE_KEY } from './pager.js';
+import { getDeviceProfile } from './device-profiles.js';
 
 // Command executor — extracted from ssh-mcp-multi execSshCommand (lines 520-569)
 // with the following changes:
@@ -36,6 +39,14 @@ export async function execCommand(
 
   return new Promise<ExecResult>((resolve, reject) => {
     const timeout = manager.timeout;
+    // Device profile: network-device CLIs paginate and read the advance key
+    // from a terminal, so exec allocates a PTY for them (the pager then
+    // receives the Space that createPagerAdvancer sends). Linux/generic hosts
+    // keep the no-PTY path. `clean` strips ANSI (PTY only) + pager prompts so
+    // the model sees plain, continuous output.
+    const profile = getDeviceProfile(manager.deviceType);
+    const clean = (text: string): string =>
+      stripPagerArtifacts(profile.pty ? stripAnsi(text) : text);
     let isResolved = false;
     let stdout = '';
     let stderr = '';
@@ -67,7 +78,7 @@ export async function execCommand(
         // stream already gone - ignore
       }
       resolve({
-        stdout,
+        stdout: clean(stdout),
         stderr,
         exitCode: null, // aborted - no real exit code
         durationMs: Date.now() - start,
@@ -94,7 +105,7 @@ export async function execCommand(
     }
 
     const conn = manager.getConnection();
-    conn.exec(command, (err, stream) => {
+    const onExec = (err: Error | undefined, stream: ClientChannel) => {
       if (err) {
         if (!isResolved) {
           isResolved = true;
@@ -106,10 +117,26 @@ export async function execCommand(
 
       activeStream = stream as unknown as { close: () => void };
 
+      // Network-device pager handling: when the device emits a `---- More ----`
+      // prompt and blocks waiting for a keypress, send Space to advance to the
+      // next page so the command completes instead of timing out. Prompt lines
+      // (and, in PTY mode, ANSI escapes) are stripped from both the streaming
+      // chunks and the final stdout so the model sees clean, continuous output.
+      const advancer = createPagerAdvancer({
+        onAdvance: () => {
+          try {
+            stream.write(PAGER_ADVANCE_KEY);
+          } catch {
+            // stream already closed - ignore
+          }
+        },
+      });
+
       stream.on('data', (data: Buffer) => {
         const chunk = data.toString();
         stdout += chunk;
-        onStream?.({ stream: 'stdout', data: chunk });
+        advancer.consumeChunk(chunk);
+        onStream?.({ stream: 'stdout', data: clean(chunk) });
       });
       stream.stderr.on('data', (data: Buffer) => {
         const chunk = data.toString();
@@ -125,7 +152,7 @@ export async function execCommand(
           clearTimeout(timeoutId);
           if (signal) signal.removeEventListener('abort', onAbort);
           resolve({
-            stdout,
+            stdout: clean(stdout),
             stderr,
             exitCode,
             durationMs: Date.now() - start,
@@ -133,7 +160,15 @@ export async function execCommand(
           });
         }
       });
-    });
+    };
+    // Network devices: allocate a PTY so the device's pager reads the Space we
+    // send. A wide column count avoids line-wrap artifacts in the captured
+    // output. Linux/generic hosts use the plain no-PTY exec channel.
+    if (profile.pty) {
+      conn.exec(command, { pty: { term: 'xterm', cols: 200, rows: 50 } }, onExec);
+    } else {
+      conn.exec(command, onExec);
+    }
   });
 }
 
@@ -196,8 +231,23 @@ function execViaSuShell(
       }
     }, timeout);
 
+    // Pager handling for the su shell path (a command run as root may still
+    // paginate, e.g. a tool that ignores --no-pager). Advance with Space and
+    // strip the prompt from the returned output.
+    const advancer = createPagerAdvancer({
+      onAdvance: () => {
+        try {
+          suShell.write(PAGER_ADVANCE_KEY);
+        } catch {
+          // shell already closed - ignore
+        }
+      },
+    });
+
     const dataHandler = (data: Buffer) => {
-      buffer += data.toString();
+      const text = data.toString();
+      buffer += text;
+      advancer.consumeChunk(text);
       // Wait for the shell prompt (ends with #) to signal command completion
       if (/#\s*$/.test(buffer)) {
         if (!isResolved) {
@@ -206,7 +256,7 @@ function execViaSuShell(
           suShell.removeAllListeners('data');
           // Drop the echoed command line and the trailing prompt
           const lines = buffer.split('\n');
-          const output = lines.slice(1, -1).join('\n');
+          const output = stripPagerArtifacts(lines.slice(1, -1).join('\n'));
           resolve({
             stdout: output,
             stderr: '',

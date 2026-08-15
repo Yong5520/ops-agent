@@ -1,6 +1,6 @@
 {
   "name": "ops-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "AI 驱动的 Linux 运维 Agent 桌面客户端",
   "main": "out/main/index.js",
   "author": "OpsAgent",
@@ -42,6 +42,7 @@
     "react-markdown": "^9.0.1",
     "react-router-dom": "^6.26.0",
     "remark-gfm": "^4.0.0",
+    "serialport": "^13.0.0",
     "ssh2": "^1.15.0",
     "tailwind-merge": "^2.5.0",
     "zod": "^3.23.0",

@@ -2,6 +2,7 @@ import { Client } from 'ssh2';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { SshClientConfig, ConnectionState } from './types.js';
+import type { DeviceType } from '../../shared/types.js';
 import { logger } from '../utils/logger.js';
 
 // SSHConnectionManager manages a single SSH connection to one host.
@@ -37,6 +38,16 @@ export function fingerprintOfHostKey(key: Buffer | string): string {
 }
 
 /**
+ * Truncate a "SHA256:<base64>" fingerprint for display in error messages.
+ * Full fingerprints (~47 chars) flood the UI; the prefix + first 16 base64
+ * chars are enough to tell two keys apart. The full expected/actual values
+ * are also written to the log via logger.warn in buildConnectConfig.
+ */
+function truncateFingerprint(fp: string): string {
+  return fp.length > 24 ? `${fp.slice(0, 24)}…` : fp;
+}
+
+/**
  * Build the ssh2 connect-config object from an SshClientConfig (V3-09 extracted
  * from connect() so it is unit-testable). Pure - no ssh2 Client needed.
  *
@@ -49,7 +60,10 @@ export function fingerprintOfHostKey(key: Buffer | string): string {
  */
 export function buildConnectConfig(
   config: SshClientConfig,
-  opts: { onHostKey?: (fingerprint: string) => void } = {},
+  opts: {
+    onHostKey?: (fingerprint: string) => void;
+    onMismatch?: (expected: string, actual: string) => void;
+  } = {},
 ): Record<string, unknown> {
   const connectConfig: Record<string, unknown> = {
     host: config.host,
@@ -84,6 +98,10 @@ export function buildConnectConfig(
       const ok = actual === expected;
       if (!ok) {
         logger.warn(`[SSH] Host key fingerprint mismatch: expected ${expected}, got ${actual}`);
+        // V3-10: surface the actual fingerprints to the connection manager so
+        // it can augment ssh2's opaque "Host denied (verification failed)" with
+        // a actionable diagnostic + a hint to clear the stale fingerprint.
+        opts.onMismatch?.(expected, actual);
       }
       verify(ok);
     };
@@ -119,6 +137,11 @@ export class SSHConnectionManager extends EventEmitter {
   } | null = null;
   private suPromise: Promise<void> | null = null;
   private isElevated = false;
+  // V3-10: populated by the hostVerifier callback when a stored fingerprint
+  // mismatches the server's current key. Read by the 'error' handler to
+  // augment ssh2's opaque "Host denied (verification failed)" with the actual
+  // fingerprints + a hint to clear the stale record. Reset on each connect().
+  private hostKeyMismatch: { expected: string; actual: string } | null = null;
   private state: ConnectionState = 'disconnected';
 
   constructor(
@@ -140,6 +163,12 @@ export class SSHConnectionManager extends EventEmitter {
 
   get suPassword(): string | undefined {
     return this.config.suPassword;
+  }
+
+  // Device type drives the exec profile (PTY for network-device CLIs). Defaults
+  // to 'linux' (no-PTY) when unset so old configs behave as before.
+  get deviceType(): DeviceType {
+    return this.config.deviceType ?? 'linux';
   }
 
   getState(): ConnectionState {
@@ -184,6 +213,9 @@ export class SSHConnectionManager extends EventEmitter {
 
     this.isConnecting = true;
     this.setState('connecting');
+    // V3-10: clear any stale mismatch info from a previous attempt so the
+    // error handler doesn't surface a stale diagnostic.
+    this.hostKeyMismatch = null;
 
     // V3-09: obtain the jump-host stream BEFORE constructing the connect
     // promise (the promise executor is synchronous, so it cannot await).
@@ -237,7 +269,16 @@ export class SSHConnectionManager extends EventEmitter {
         this.connectionPromise = null;
         this.setState('error', err.message);
         logger.error(`[${this.hostName}] SSH error: ${err.message}`);
-        reject(new OpsAgentError(`[${this.hostName}] SSH error: ${err.message}`, 'SSH_ERROR'));
+        // V3-10: if the hostVerifier recorded a fingerprint mismatch, append
+        // the actual fingerprints + a recovery hint. ssh2's raw message
+        // "Host denied (verification failed)" gives the user no clue why or
+        // how to recover (the stored fingerprint is stale). Note: in encoded-
+        // bastion mode the verified fingerprint is the bastion's (stored on
+        // the bastion's host record), so the hint covers both cases.
+        const message = this.hostKeyMismatch
+          ? `${err.message}（主机密钥不匹配：期望 ${truncateFingerprint(this.hostKeyMismatch.expected)}，实际 ${truncateFingerprint(this.hostKeyMismatch.actual)}。请在主机配置中清除主机密钥后重试；若使用堡垒机编码模式，请清除堡垒机的主机密钥）`
+          : err.message;
+        reject(new OpsAgentError(`[${this.hostName}] SSH error: ${message}`, 'SSH_ERROR'));
       });
 
       // V3-09.1: encoded-bastion manual target auth. The bastion issues a
@@ -288,6 +329,9 @@ export class SSHConnectionManager extends EventEmitter {
 
       const connectConfig = buildConnectConfig(this.config, {
         onHostKey: this.onHostKey,
+        onMismatch: (expected, actual) => {
+          this.hostKeyMismatch = { expected, actual };
+        },
       });
 
       // V3-09: jump/bastion host - pass the stream obtained above as `sock` so

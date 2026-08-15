@@ -3,9 +3,24 @@ import { useHostStore } from '../../store/hostStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { Input, Field, Select } from '../../components/Form.js';
+import { SearchInput } from '../../components/SearchInput.js';
 import { GroupCreateInput } from './GroupCreateInput.js';
 import { groupHostsByFolder } from '../../utils/host-groups.js';
-import type { HostConfig, HostInput, AuthType } from '../../../shared/types.js';
+import { filterHosts } from '../../utils/host-search.js';
+import type {
+  HostConfig,
+  HostInput,
+  AuthType,
+  DeviceType,
+  ConnectionType,
+  SerialParity,
+  SerialFlowControl,
+} from '../../../shared/types.js';
+
+// Baud rates offered in the host-config serial form (mirrors
+// src/main/serial/serial-options.ts BAUD_RATES). 9600 is the network-device
+// console default.
+const BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
 interface HostStatus {
   hostId: string;
@@ -47,6 +62,7 @@ export function HostConfigSection() {
   const [groupEditName, setGroupEditName] = useState('');
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [groupError, setGroupError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     load();
@@ -98,6 +114,10 @@ export function HostConfigSection() {
   }, []);
 
   const toggleGroup = (group: string) => {
+    // Ignore group toggles while searching: groups are force-expanded during a
+    // search, so a click would mutate/persist collapse state with no visible
+    // feedback, then surface as a surprise collapse after the search clears.
+    if (searchQuery.trim()) return;
     const next = new Set(collapsed);
     if (next.has(group)) {
       next.delete(group);
@@ -149,7 +169,15 @@ export function HostConfigSection() {
   // Group hosts by folder for organized display. Explicitly-created folders
   // (incl. empty ones) are unioned with host-derived folders; 'default' first,
   // then the rest alphabetical. Shared util (also used by SessionSidebar).
-  const hostGroups = groupHostsByFolder(hosts, groups);
+  //
+  // Search: filter by the query (empty = pass-through) before grouping. While
+  // searching, drop groups that ended up empty and force-expand the rest so
+  // every match is visible. Clearing the query restores the original grouped
+  // view (incl. empty explicit folders) untouched.
+  const filteredHosts = filterHosts(hosts, searchQuery);
+  const hostGroups = groupHostsByFolder(filteredHosts, groups);
+  const searching = searchQuery.trim().length > 0;
+  const visibleGroups = searching ? hostGroups.filter((g) => g.hosts.length > 0) : hostGroups;
 
   return (
     <div className="space-y-4">
@@ -193,14 +221,28 @@ export function HostConfigSection() {
         />
       )}
 
+      {hosts.length > 0 && (
+        <SearchInput
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="搜索主机名称 / IP / 用户名"
+          className="max-w-md"
+        />
+      )}
+
       <div className="space-y-3">
         {hosts.length === 0 && !showForm && (
           <p className="rounded-md border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-600">
             尚未配置任何主机。点击"添加主机"或"批量导入"开始。
           </p>
         )}
-        {hostGroups.map(({ group, hosts: groupHosts }) => {
-          const isCollapsed = collapsed.has(group);
+        {hosts.length > 0 && visibleGroups.length === 0 && (
+          <p className="rounded-md border border-dashed border-zinc-800 px-4 py-8 text-center text-sm text-zinc-600">
+            未找到匹配的主机
+          </p>
+        )}
+        {visibleGroups.map(({ group, hosts: groupHosts }) => {
+          const isCollapsed = searching ? false : collapsed.has(group);
           return (
             <div key={group}>
               {/* Group header with collapse + rename/delete actions */}
@@ -293,10 +335,20 @@ export function HostConfigSection() {
                               }
                             />
                             <span className="text-sm font-medium text-zinc-100">{h.name}</span>
+                            {h.connectionType === 'serial' && (
+                              <span className="ml-1 rounded bg-amber-900/60 px-1.5 py-0.5 text-[10px] font-medium text-amber-200">
+                                串口
+                              </span>
+                            )}
                           </div>
                           <div className="truncate text-xs text-zinc-500">
-                            {h.username}@{h.host}:{h.port} ·{' '}
-                            {h.authType === 'password' ? '密码' : '密钥'}
+                            {h.connectionType === 'serial'
+                              ? `${h.serialPort ?? h.host} @ ${h.baudRate ?? 9600}bps${
+                                  h.loginRequired ? ' · 需登录' : ''
+                                }`
+                              : `${h.username}@${h.host}:${h.port} · ${
+                                  h.authType === 'password' ? '密码' : '密钥'
+                                }`}
                           </div>
                           {status?.testError && (
                             <div className="mt-0.5 text-xs text-red-400">⚠ {status.testError}</div>
@@ -406,11 +458,32 @@ function HostForm({
   const [username, setUsername] = useState(editing?.username ?? '');
   const [authType, setAuthType] = useState<AuthType>(editing?.authType ?? 'password');
   const [password, setPassword] = useState('');
+  // V3-11: serial console support. connectionType defaults to 'ssh' so every
+  // existing host/form stays SSH; serial hosts show a port/baud/login form
+  // instead of the SSH address/auth fields.
+  const [connectionType, setConnectionType] = useState<ConnectionType>(
+    editing?.connectionType ?? 'ssh',
+  );
+  const [serialPort, setSerialPort] = useState(editing?.serialPort ?? '');
+  const [baudRate, setBaudRate] = useState(editing?.baudRate ?? 9600);
+  const [dataBits, setDataBits] = useState<7 | 8>(editing?.dataBits ?? 8);
+  const [stopBits, setStopBits] = useState<1 | 2>(editing?.stopBits ?? 1);
+  const [parity, setParity] = useState<SerialParity>(editing?.parity ?? 'none');
+  const [flowControl, setFlowControl] = useState<SerialFlowControl>(editing?.flowControl ?? 'none');
+  const [loginRequired, setLoginRequired] = useState(editing?.loginRequired ?? false);
+  const [serialPorts, setSerialPorts] = useState<
+    Array<{ path: string; manufacturer?: string; serialNumber?: string; friendlyName?: string }>
+  >([]);
+  const [refreshingPorts, setRefreshingPorts] = useState(false);
+  const [showSerialAdvanced, setShowSerialAdvanced] = useState(false);
   const [keyPath, setKeyPath] = useState(editing?.keyPath ?? '');
   const [sudoPassword, setSudoPassword] = useState('');
   const [suPassword, setSuPassword] = useState('');
   const [groupName, setGroupName] = useState(editing?.groupName ?? 'default');
   const [timeoutMs, setTimeoutMs] = useState(editing?.timeoutMs ?? 60000);
+  // Phase 2: device type selects the exec profile (PTY for paginating
+  // network-device CLIs, no-PTY for Linux). Defaults to 'linux'.
+  const [deviceType, setDeviceType] = useState<DeviceType>(editing?.deviceType ?? 'linux');
   // V3-09: SSH bastion / agent forwarding / host-key fields.
   const [jumpHostId, setJumpHostId] = useState(editing?.jumpHostId ?? '');
   const [agentForward, setAgentForward] = useState(editing?.agentForward ?? false);
@@ -424,6 +497,53 @@ function HostForm({
   );
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // V3-10: local mirror of the recorded host-key fingerprint. The fingerprint
+  // is auto-captured on first connect (TOFU) and is read-only here - the only
+  // user action is "clear" (recover from a stale fingerprint after a host
+  // re-key or address change). Kept in local state so the display hides
+  // immediately after a clear without reopening the form.
+  const [hostKeyFingerprint, setHostKeyFingerprint] = useState<string | undefined>(
+    editing?.hostKeyFingerprint,
+  );
+  const [clearingKey, setClearingKey] = useState(false);
+
+  // V3-11: enumerate local serial ports for the picker. Refreshed when the
+  // form switches to serial mode (and on demand via the refresh button).
+  const refreshSerialPorts = useCallback(async () => {
+    setRefreshingPorts(true);
+    try {
+      setSerialPorts(await window.opsAgent.serial.listPorts());
+    } catch {
+      setSerialPorts([]);
+    } finally {
+      setRefreshingPorts(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (connectionType === 'serial') {
+      void refreshSerialPorts();
+    }
+  }, [connectionType, refreshSerialPorts]);
+
+  const handleClearHostKey = async () => {
+    if (!editing || clearingKey) return;
+    const ok = await useUiStore.getState().confirm({
+      message:
+        '清除已记录的主机密钥？下次连接将重新校验并记录新指纹（适用于主机重装/更换地址后连接失败的情况）。',
+      confirmLabel: '清除',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    setClearingKey(true);
+    try {
+      await window.opsAgent.hosts.clearHostKey(editing.id);
+      setHostKeyFingerprint(undefined);
+    } catch (err) {
+      setFormError((err as Error).message || '清除主机密钥失败');
+    } finally {
+      setClearingKey(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -433,7 +553,10 @@ function HostForm({
     try {
       const input: HostInput = {
         name: name.trim(),
-        host: host.trim(),
+        // Serial hosts have no network address - mirror the port path into
+        // `host` (the store enforces this too) so audit logs / terminal titles
+        // show a meaningful value.
+        host: connectionType === 'serial' ? serialPort.trim() : host.trim(),
         port,
         username: username.trim(),
         authType,
@@ -443,14 +566,25 @@ function HostForm({
         suPassword: suPassword || undefined,
         groupName: groupName.trim(),
         timeoutMs,
+        deviceType,
         jumpHostId: jumpHostId || undefined,
         agentForward,
-        hostKeyFingerprint: editing?.hostKeyFingerprint,
+        hostKeyFingerprint,
         // V3-09.1: only carry jumpMode/template/targetAuth when a jump host is
         // actually selected - otherwise the host is direct-connect.
         jumpMode: jumpHostId ? jumpMode : 'forward',
         jumpUsernameTemplate: jumpUsernameTemplate.trim() || undefined,
         jumpTargetAuth: jumpHostId ? jumpTargetAuth : 'bastion-managed',
+        // V3-11: serial console fields. Only meaningful when connectionType is
+        // 'serial'; carried through as undefined for SSH hosts.
+        connectionType,
+        serialPort: connectionType === 'serial' ? serialPort.trim() || undefined : undefined,
+        baudRate: connectionType === 'serial' ? baudRate : undefined,
+        dataBits: connectionType === 'serial' ? dataBits : undefined,
+        stopBits: connectionType === 'serial' ? stopBits : undefined,
+        parity: connectionType === 'serial' ? parity : undefined,
+        flowControl: connectionType === 'serial' ? flowControl : undefined,
+        loginRequired: connectionType === 'serial' ? loginRequired : undefined,
       };
       await onSave(input);
     } catch (err) {
@@ -493,14 +627,39 @@ function HostForm({
               required
             />
           </Field>
-          <Field label="主机地址">
-            <Input
-              value={host}
-              onChange={(e) => setHost(e.target.value)}
-              placeholder="10.31.10.110"
-              required
-            />
+          <Field label="连接方式">
+            <Select
+              value={connectionType}
+              onChange={(e) => setConnectionType(e.target.value as ConnectionType)}
+            >
+              <option value="ssh">SSH（网络主机）</option>
+              <option value="serial">串口（Console 控制台，交换机初始化等）</option>
+            </Select>
           </Field>
+          {connectionType === 'ssh' ? (
+            <>
+              <Field label="主机地址">
+                <Input
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  placeholder="10.31.10.110"
+                  required
+                />
+              </Field>
+            </>
+          ) : (
+            <Field label="波特率">
+              <Select value={baudRate} onChange={(e) => setBaudRate(Number(e.target.value))}>
+                {BAUD_RATES.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
+        </div>
+        {connectionType === 'ssh' ? (
           <Field label="端口">
             <Input
               type="number"
@@ -509,70 +668,188 @@ function HostForm({
               required
             />
           </Field>
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="用户名">
-            <Input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="root"
-              required
-            />
-          </Field>
-          <Field label="认证方式">
-            <Select value={authType} onChange={(e) => setAuthType(e.target.value as AuthType)}>
-              <option value="password">密码</option>
-              <option value="key">SSH 密钥</option>
-            </Select>
-          </Field>
-          <Field label="分组">
-            <Select value={groupName} onChange={(e) => setGroupName(e.target.value)}>
-              {groups.map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </div>
-        {authType === 'password' ? (
-          <Field label="密码">
-            <Input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={editing ? '••••（留空不修改）' : '输入密码'}
-              required={!editing}
-            />
-          </Field>
         ) : (
-          <Field label="密钥文件路径">
-            <Input
-              value={keyPath}
-              onChange={(e) => setKeyPath(e.target.value)}
-              placeholder="~/.ssh/id_rsa"
-              required={!editing}
-            />
+          <Field label="串口（本地 COM 口 / ttyUSB，如 COM3、/dev/ttyUSB0）">
+            <div className="flex gap-2">
+              <Input
+                list="serial-port-list"
+                value={serialPort}
+                onChange={(e) => setSerialPort(e.target.value)}
+                placeholder="COM3"
+                required
+              />
+              <datalist id="serial-port-list">
+                {serialPorts.map((p) => (
+                  <option key={p.path} value={p.path}>
+                    {[p.friendlyName, p.manufacturer].filter(Boolean).join(' - ')}
+                  </option>
+                ))}
+              </datalist>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => void refreshSerialPorts()}
+                disabled={refreshingPorts}
+              >
+                {refreshingPorts ? '刷新中…' : '刷新端口'}
+              </Button>
+            </div>
+            {serialPorts.length === 0 && !refreshingPorts && (
+              <div className="mt-1 text-xs text-zinc-500">
+                未检测到串口。确认设备已连接，或直接手动输入端口路径。
+              </div>
+            )}
           </Field>
         )}
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="sudo 密码（可选）">
-            <Input
-              type="password"
-              value={sudoPassword}
-              onChange={(e) => setSudoPassword(e.target.value)}
-              placeholder={editing ? '••••（留空不修改）' : '用于 sudo 提权'}
-            />
-          </Field>
-          <Field label="su 密码（可选）">
-            <Input
-              type="password"
-              value={suPassword}
-              onChange={(e) => setSuPassword(e.target.value)}
-              placeholder={editing ? '••••（留空不修改）' : '用于 su 持久 root shell'}
-            />
-          </Field>
-        </div>
+        {connectionType === 'serial' && (
+          <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+            <label className="flex items-center gap-2 text-xs text-zinc-300">
+              <input
+                type="checkbox"
+                checked={loginRequired}
+                onChange={(e) => setLoginRequired(e.target.checked)}
+                className="accent-emerald-600"
+              />
+              需要账号密码登录（控制台要求 Login/Password 时勾选；新设备初始化引导界面不勾选）
+            </label>
+            {loginRequired && (
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="登录用户名">
+                  <Input
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="admin"
+                  />
+                </Field>
+                <Field label="登录密码">
+                  <Input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={editing ? '••••（留空不修改）' : '输入密码'}
+                  />
+                </Field>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowSerialAdvanced((v) => !v)}
+              className="text-xs text-zinc-400 hover:text-zinc-200"
+            >
+              {showSerialAdvanced ? '▼' : '▶'} 高级串口参数
+            </button>
+            {showSerialAdvanced && (
+              <div className="grid grid-cols-4 gap-3">
+                <Field label="数据位">
+                  <Select
+                    value={dataBits}
+                    onChange={(e) => setDataBits(Number(e.target.value) as 7 | 8)}
+                  >
+                    <option value={8}>8</option>
+                    <option value={7}>7</option>
+                  </Select>
+                </Field>
+                <Field label="停止位">
+                  <Select
+                    value={stopBits}
+                    onChange={(e) => setStopBits(Number(e.target.value) as 1 | 2)}
+                  >
+                    <option value={1}>1</option>
+                    <option value={2}>2</option>
+                  </Select>
+                </Field>
+                <Field label="校验">
+                  <Select
+                    value={parity}
+                    onChange={(e) => setParity(e.target.value as SerialParity)}
+                  >
+                    <option value="none">无</option>
+                    <option value="even">偶</option>
+                    <option value="odd">奇</option>
+                  </Select>
+                </Field>
+                <Field label="流控">
+                  <Select
+                    value={flowControl}
+                    onChange={(e) => setFlowControl(e.target.value as SerialFlowControl)}
+                  >
+                    <option value="none">无</option>
+                    <option value="rtscts">硬件 (RTS/CTS)</option>
+                    <option value="xonxoff">软件 (XON/XOFF)</option>
+                  </Select>
+                </Field>
+              </div>
+            )}
+          </div>
+        )}
+        {connectionType === 'ssh' && (
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="用户名">
+                <Input
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="root"
+                  required
+                />
+              </Field>
+              <Field label="认证方式">
+                <Select value={authType} onChange={(e) => setAuthType(e.target.value as AuthType)}>
+                  <option value="password">密码</option>
+                  <option value="key">SSH 密钥</option>
+                </Select>
+              </Field>
+              <Field label="分组">
+                <Select value={groupName} onChange={(e) => setGroupName(e.target.value)}>
+                  {groups.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+            {authType === 'password' ? (
+              <Field label="密码">
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={editing ? '••••（留空不修改）' : '输入密码'}
+                  required={!editing}
+                />
+              </Field>
+            ) : (
+              <Field label="密钥文件路径">
+                <Input
+                  value={keyPath}
+                  onChange={(e) => setKeyPath(e.target.value)}
+                  placeholder="~/.ssh/id_rsa"
+                  required={!editing}
+                />
+              </Field>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="sudo 密码（可选）">
+                <Input
+                  type="password"
+                  value={sudoPassword}
+                  onChange={(e) => setSudoPassword(e.target.value)}
+                  placeholder={editing ? '••••（留空不修改）' : '用于 sudo 提权'}
+                />
+              </Field>
+              <Field label="su 密码（可选）">
+                <Input
+                  type="password"
+                  value={suPassword}
+                  onChange={(e) => setSuPassword(e.target.value)}
+                  placeholder={editing ? '••••（留空不修改）' : '用于 su 持久 root shell'}
+                />
+              </Field>
+            </div>
+          </>
+        )}
         <Field label="命令超时（毫秒）">
           <Input
             type="number"
@@ -580,88 +857,122 @@ function HostForm({
             onChange={(e) => setTimeoutMs(Number(e.target.value))}
           />
         </Field>
-        {/* V3-09: SSH bastion / agent forwarding / host-key verification. */}
-        <Field label="堡垒机 / 跳板机（可选，经此主机中转连接）">
-          <Select value={jumpHostId} onChange={(e) => setJumpHostId(e.target.value)}>
-            <option value="">不使用（直连）</option>
-            {/* Exclude self to prevent a jump-to-self cycle. */}
-            {allHosts
-              .filter((h) => h.id !== editing?.id)
-              .map((h) => (
-                <option key={h.id} value={h.id}>
-                  {h.name} ({h.host})
-                </option>
-              ))}
+        <Field label="设备类型（交换机/路由器分页输出需选对应类型）">
+          <Select value={deviceType} onChange={(e) => setDeviceType(e.target.value as DeviceType)}>
+            <option value="linux">Linux 服务器（默认）</option>
+            <option value="huawei-vrp">华为 VRP（FutureMatrix/S6735 等）</option>
+            <option value="cisco-ios">Cisco IOS</option>
+            <option value="h3c">H3C</option>
+            <option value="juniper-junos">Juniper Junos</option>
+            <option value="arista-eos">Arista EOS</option>
+            <option value="generic">其他/未知</option>
           </Select>
         </Field>
-        {jumpHostId && (
-          <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 space-y-3">
-            <div className="text-xs font-medium text-zinc-400">跳转模式（如何经堡垒机连接）</div>
-            <Field label="跳转模式">
-              <Select
-                value={jumpMode}
-                onChange={(e) => setJumpMode(e.target.value as 'forward' | 'encoded')}
-              >
-                <option value="forward">TCP 转发（forward，堡垒机允许端口转发时用）</option>
-                <option value="encoded">用户名编码（encoded，堡垒机禁用端口转发时用）</option>
+        {/* V3-09: SSH bastion / agent forwarding / host-key verification. */}
+        {connectionType === 'ssh' && (
+          <>
+            <Field label="堡垒机 / 跳板机（可选，经此主机中转连接）">
+              <Select value={jumpHostId} onChange={(e) => setJumpHostId(e.target.value)}>
+                <option value="">不使用（直连）</option>
+                {/* Exclude self to prevent a jump-to-self cycle. */}
+                {allHosts
+                  .filter((h) => h.id !== editing?.id)
+                  .map((h) => (
+                    <option key={h.id} value={h.id}>
+                      {h.name} ({h.host})
+                    </option>
+                  ))}
               </Select>
             </Field>
-            {jumpMode === 'encoded' && (
-              <>
-                <div className="text-xs text-zinc-500">
-                  用户名编码模式：单次连接到堡垒机，用户名编码为目标信息 （如{' '}
-                  <code className="font-mono">堡垒机用户@目标用户@目标IP</code>
-                  ），堡垒机自行登录目标。 凭据使用<strong>堡垒机主机记录</strong>
-                  里配的密码/密钥（本机路径）， 此处的目标密码仅在"手动密码"时用于二次认证。
+            {jumpHostId && (
+              <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 space-y-3">
+                <div className="text-xs font-medium text-zinc-400">
+                  跳转模式（如何经堡垒机连接）
                 </div>
-                <Field label="用户名编码模板（可选，留空用默认 {bastionUser}@{targetUser}@{targetHost}）">
-                  <Input
-                    value={jumpUsernameTemplate}
-                    onChange={(e) => setJumpUsernameTemplate(e.target.value)}
-                    placeholder="{bastionUser}@{targetUser}@{targetHost}"
-                  />
-                </Field>
-                <Field label="目标认证方式">
+                <Field label="跳转模式">
                   <Select
-                    value={jumpTargetAuth}
-                    onChange={(e) =>
-                      setJumpTargetAuth(e.target.value as 'bastion-managed' | 'password')
-                    }
+                    value={jumpMode}
+                    onChange={(e) => setJumpMode(e.target.value as 'forward' | 'encoded')}
                   >
-                    <option value="bastion-managed">
-                      堡垒机托管（堡垒机用自己存的凭据登录目标）
-                    </option>
-                    <option value="password">手动密码（用上面的目标密码做二次键盘交互认证）</option>
+                    <option value="forward">TCP 转发（forward，堡垒机允许端口转发时用）</option>
+                    <option value="encoded">用户名编码（encoded，堡垒机禁用端口转发时用）</option>
                   </Select>
                 </Field>
-              </>
-            )}
-            {jumpMode === 'forward' && (
-              <div className="text-xs text-zinc-500">
-                TCP 转发模式：先连堡垒机，再经其端口转发隧道连目标。 凭据使用
-                <strong>目标主机</strong>的密码/密钥（本机路径）。 若堡垒机报"port forwarding is
-                disabled"，请改用用户名编码模式。
+                {jumpMode === 'encoded' && (
+                  <>
+                    <div className="text-xs text-zinc-500">
+                      用户名编码模式：单次连接到堡垒机，用户名编码为目标信息 （如{' '}
+                      <code className="font-mono">堡垒机用户@目标用户@目标IP</code>
+                      ），堡垒机自行登录目标。 凭据使用<strong>堡垒机主机记录</strong>
+                      里配的密码/密钥（本机路径）， 此处的目标密码仅在"手动密码"时用于二次认证。
+                    </div>
+                    <Field label="用户名编码模板（可选，留空用默认 {bastionUser}@{targetUser}@{targetHost}）">
+                      <Input
+                        value={jumpUsernameTemplate}
+                        onChange={(e) => setJumpUsernameTemplate(e.target.value)}
+                        placeholder="{bastionUser}@{targetUser}@{targetHost}"
+                      />
+                    </Field>
+                    <Field label="目标认证方式">
+                      <Select
+                        value={jumpTargetAuth}
+                        onChange={(e) =>
+                          setJumpTargetAuth(e.target.value as 'bastion-managed' | 'password')
+                        }
+                      >
+                        <option value="bastion-managed">
+                          堡垒机托管（堡垒机用自己存的凭据登录目标）
+                        </option>
+                        <option value="password">
+                          手动密码（用上面的目标密码做二次键盘交互认证）
+                        </option>
+                      </Select>
+                    </Field>
+                  </>
+                )}
+                {jumpMode === 'forward' && (
+                  <div className="text-xs text-zinc-500">
+                    TCP 转发模式：先连堡垒机，再经其端口转发隧道连目标。 凭据使用
+                    <strong>目标主机</strong>的密码/密钥（本机路径）。 若堡垒机报"port forwarding is
+                    disabled"，请改用用户名编码模式。
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
-        <label className="flex items-center gap-2 text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={agentForward}
-            onChange={(e) => setAgentForward(e.target.checked)}
-            className="h-4 w-4 rounded border-zinc-700 bg-zinc-900"
-          />
-          启用 SSH Agent 转发（目标主机可复用本地 agent 凭据）
-        </label>
-        {editing?.hostKeyFingerprint && (
-          <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-400">
-            <span className="font-medium text-zinc-300">主机密钥指纹（已记录）：</span>
-            <code className="ml-1 break-all font-mono">{editing.hostKeyFingerprint}</code>
-            <div className="mt-1 text-zinc-500">
-              首次连接时自动记录，后续连接校验此指纹以防中间人攻击。
-            </div>
-          </div>
+            <label className="flex items-center gap-2 text-sm text-zinc-300">
+              <input
+                type="checkbox"
+                checked={agentForward}
+                onChange={(e) => setAgentForward(e.target.checked)}
+                className="h-4 w-4 rounded border-zinc-700 bg-zinc-900"
+              />
+              启用 SSH Agent 转发（目标主机可复用本地 agent 凭据）
+            </label>
+            {hostKeyFingerprint && (
+              <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-400">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="font-medium text-zinc-300">主机密钥指纹（已记录）：</span>
+                    <code className="ml-1 break-all font-mono">{hostKeyFingerprint}</code>
+                    <div className="mt-1 text-zinc-500">
+                      首次连接时自动记录，后续连接校验此指纹以防中间人攻击。若主机重装或更换地址后连接失败（Host
+                      denied），可清除后重新校验。
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleClearHostKey}
+                    disabled={clearingKey}
+                    className="shrink-0"
+                    title="清除已记录的指纹，下次连接重新校验（TOFU）"
+                  >
+                    {clearingKey ? '清除中...' : '清除主机密钥'}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
         )}
         <div className="flex justify-end gap-2 border-t border-zinc-800 pt-3">
           <Button variant="ghost" onClick={onClose} disabled={submitting}>
@@ -764,6 +1075,7 @@ function ImportModal({
         groupName,
         timeoutMs: 60000,
         agentForward: false,
+        deviceType: 'linux',
       });
     }
 

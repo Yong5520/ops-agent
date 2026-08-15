@@ -28,7 +28,14 @@ interface PendingAttachment {
 
 interface MessageInputProps {
   isRunning: boolean;
+  /** Session currently running a loop (null when idle). */
+  runningSessionId?: string | null;
+  /** Session the user is currently viewing. */
+  currentSessionId?: string;
   onSend: (text: string, attachments?: AgentAttachmentInput[]) => void;
+  /** Phase 3: enqueue a steer message typed mid-run (when the viewed session is
+   * the one running). Routed instead of onSend while in steer mode. */
+  onSteer?: (text: string) => void;
   onCancel: () => void;
   editFromMessage?: Message | null;
   onClearEdit?: () => void;
@@ -51,7 +58,10 @@ interface SkillInfo {
 
 export function MessageInput({
   isRunning,
+  runningSessionId,
+  currentSessionId,
   onSend,
+  onSteer,
   onCancel,
   editFromMessage,
   onClearEdit,
@@ -132,9 +142,23 @@ export function MessageInput({
     return [...builtinCommands, ...skillCommands].filter((c) => c.name.toLowerCase().startsWith(q));
   }, [slashActive, slashQuery, skills]);
 
+  // Phase 3: steer mode - the viewed session is the one running, so the user
+  // can type to redirect the task mid-run. Input is enabled and send enqueues
+  // a steer (drained by the loop before the next round) instead of starting a
+  // new run. When another session is running, input is disabled (no concurrent
+  // runs).
+  const isSteerMode = isRunning && !!runningSessionId && runningSessionId === currentSessionId;
+
   const handleSend = () => {
     const trimmed = text.trim();
-    if ((!trimmed && pendingAttachments.length === 0) || isRunning) return;
+    if ((!trimmed && pendingAttachments.length === 0) || (isRunning && !isSteerMode)) return;
+    if (isSteerMode && onSteer) {
+      onSteer(trimmed);
+      setText('');
+      setMention({ active: false, query: '', startIndex: -1 });
+      setSlashActive(false);
+      return;
+    }
     const attachments: AgentAttachmentInput[] | undefined =
       pendingAttachments.length > 0
         ? pendingAttachments.map((a) => ({
@@ -557,13 +581,29 @@ export function MessageInput({
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={placeholder}
+            placeholder={
+              isSteerMode ? '输入消息加入队列，下一轮反馈给模型以调整方向…' : placeholder
+            }
             rows={2}
             className="flex-1 resize-none rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-            disabled={isRunning}
+            disabled={isRunning && !isSteerMode}
             autoFocus
           />
-          {isRunning ? (
+          {isSteerMode ? (
+            <>
+              <Button
+                variant="primary"
+                onClick={handleSend}
+                disabled={!text.trim()}
+                title="将消息加入队列，在下一轮反馈给模型"
+              >
+                排队
+              </Button>
+              <Button variant="danger" onClick={onCancel}>
+                停止
+              </Button>
+            </>
+          ) : isRunning ? (
             <Button variant="danger" onClick={onCancel}>
               停止
             </Button>

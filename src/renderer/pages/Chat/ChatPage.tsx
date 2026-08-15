@@ -14,6 +14,8 @@ import { useHostStore } from '../../store/hostStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { SessionModelSelector } from './SessionModelSelector.js';
+import { AiActivityTerminal } from './AiActivityTerminal.js';
+import { useActivityTerminalStore } from '../../store/activityTerminalStore.js';
 import type { Message } from '../../../shared/types.js';
 
 interface PendingPlanApproval {
@@ -39,12 +41,17 @@ export function ChatPage() {
     toolCards,
     error,
     contextUsage,
+    pendingSteersBySession,
     startRun,
     cancelRun,
+    steerMessage,
     clearError,
   } = useAgentStore();
   const { activeProvider, providers, load: loadModels } = useModelStore();
   const { hosts, load: loadHosts } = useHostStore();
+  const activityOpen = useActivityTerminalStore((s) => s.isOpen);
+  const openActivity = useActivityTerminalStore((s) => s.open);
+  const closeActivity = useActivityTerminalStore((s) => s.close);
   const [editFromMessage, setEditFromMessage] = useState<Message | null>(null);
   const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
 
@@ -520,6 +527,7 @@ export function ChatPage() {
           {/* Input - always available so user can type and @mention hosts even without a session */}
           <MessageInput
             isRunning={isRunning}
+            runningSessionId={runningSessionId}
             onSend={handleSend}
             onCancel={() => {}}
             onMentionHost={handleMentionHost}
@@ -533,7 +541,7 @@ export function ChatPage() {
     <div className="flex flex-1 min-h-0 overflow-hidden">
       <SessionSidebar />
 
-      <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      <div className="flex flex-1 min-w-0 flex-col min-h-0 overflow-hidden">
         {/* Header */}
         <header className="flex items-center justify-between border-b border-zinc-800 px-6 py-3">
           <div className="min-w-0">
@@ -584,6 +592,14 @@ export function ChatPage() {
                 </Button>
               </div>
             )}
+            <Button
+              size="sm"
+              variant={activityOpen ? 'primary' : 'ghost'}
+              onClick={activityOpen ? closeActivity : openActivity}
+              title="打开/关闭 AI 活动终端(只读实时回放 AI 执行的命令与输出)"
+            >
+              活动终端
+            </Button>
             {currentSession && (
               <Button size="sm" variant="ghost" onClick={handleExport}>
                 导出
@@ -611,19 +627,35 @@ export function ChatPage() {
           isRunning={isRunning}
           runningSessionId={runningSessionId}
           currentSessionId={currentSession?.id}
+          pendingSteers={currentSession ? pendingSteersBySession[currentSession.id] : undefined}
           onEditMessage={handleEdit}
         />
 
         {/* Input */}
         <MessageInput
           isRunning={isRunning}
+          runningSessionId={runningSessionId}
+          currentSessionId={currentSession?.id}
           onSend={handleSend}
-          onCancel={() => currentSession && cancelRun(currentSession.id)}
+          onSteer={(text) => currentSession && steerMessage(currentSession.id, text)}
+          onCancel={() => {
+            // Stop the running session (not necessarily the viewed one) so the
+            // user can halt a background task from any session's view.
+            const sid = runningSessionId ?? currentSession?.id;
+            if (sid) cancelRun(sid);
+          }}
           editFromMessage={editFromMessage}
           onClearEdit={() => setEditFromMessage(null)}
           onMentionHost={handleMentionHost}
         />
       </div>
+
+      {/* AI activity terminal - read-only real-time mirror of AI commands/output */}
+      {activityOpen && (
+        <div className="flex w-[30rem] min-w-0 min-h-0 flex-col border-l border-zinc-800">
+          <AiActivityTerminal onClose={closeActivity} />
+        </div>
+      )}
 
       {/* Authorization dialog (modal) */}
       <AuthDialog />

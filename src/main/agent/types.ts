@@ -4,6 +4,7 @@ import type {
   AuthorizationStatus,
   HostConfig,
   TodoItem,
+  SteerEntry,
 } from '../../shared/types.js';
 import type { PlanApprovalResult, ModeChangeCallback } from './tools/exit-plan-mode.js';
 import type { AskUserCallback } from './tools/ask-user.js';
@@ -34,6 +35,17 @@ export interface AgentLoopParams {
   // reject-and-stop), the loop breaks and runs a wind-down turn. Defaults to
   // an internal ref when not provided.
   stopRequestedRef?: StopRequestedRef;
+  // Phase 3 (steer): drains queued user messages typed mid-run to redirect the
+  // task. Returns the queued entries (and clears the queue). The loop injects
+  // each entry's `text` as a user message before the next streamText round so
+  // the model can react to the user's mid-task input. Undefined when steering
+  // is disabled.
+  consumeSteerMessages?: () => SteerEntry[];
+  // Phase 3 (steer): invoked with the entries that were just drained (and thus
+  // fed to the model on the next round). Lets the caller notify the renderer to
+  // move those queued steers from the pending queue into the message list at
+  // the right moment (after the current response, before the next one).
+  onSteerConsumed?: (entries: SteerEntry[]) => void;
   // Streaming callbacks - invoked from the main process to drive the UI.
   onTextStream: (text: string) => void;
   // Thinking/reasoning stream - emits structured events so the UI can render

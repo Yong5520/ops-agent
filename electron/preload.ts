@@ -20,6 +20,7 @@ const api: OpsAgentApi = {
     deleteGroup: (groupName: string) => ipcRenderer.invoke('hosts:deleteGroup', groupName),
     listGroups: () => ipcRenderer.invoke('hosts:listGroups'),
     createGroup: (name: string) => ipcRenderer.invoke('hosts:createGroup', name),
+    clearHostKey: (id: string) => ipcRenderer.invoke('hosts:clearHostKey', id),
   },
 
   // Models
@@ -116,6 +117,8 @@ const api: OpsAgentApi = {
   agent: {
     run: (request) => ipcRenderer.invoke('agent:run', request),
     cancel: (sessionId: string) => ipcRenderer.invoke('agent:cancel', sessionId),
+    steer: (sessionId: string, message: string, msgId: string) =>
+      ipcRenderer.invoke('agent:steer', { sessionId, message, msgId }),
     stopTool: (toolCallId: string) => ipcRenderer.invoke('agent:stop-tool', toolCallId),
     compact: (sessionId: string, instructions?: string) =>
       ipcRenderer.invoke('agent:compact', sessionId, instructions),
@@ -198,6 +201,12 @@ const api: OpsAgentApi = {
       ipcRenderer.on('agent:context-usage', listener);
       return () => ipcRenderer.removeListener('agent:context-usage', listener);
     },
+    onSteerConsumed: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:steer-consumed', listener);
+      return () => ipcRenderer.removeListener('agent:steer-consumed', listener);
+    },
   },
 
   // Tasks (TodoWrite)
@@ -221,6 +230,7 @@ const api: OpsAgentApi = {
     resize: (sessionId: string, cols: number, rows: number) =>
       ipcRenderer.invoke('terminal:resize', sessionId, cols, rows),
     kill: (sessionId: string) => ipcRenderer.invoke('terminal:kill', sessionId),
+    openWindow: (hostId: string) => ipcRenderer.invoke('terminal:openWindow', hostId),
     onData: (handler) => {
       const listener = (_e: unknown, sessionId: string, data: string) => handler(sessionId, data);
       ipcRenderer.on('terminal:data', listener);
@@ -244,6 +254,15 @@ const api: OpsAgentApi = {
       ipcRenderer.on('terminal:reconnect', listener);
       return () => ipcRenderer.removeListener('terminal:reconnect', listener);
     },
+  },
+
+  // Serial console support (local COM/tty ports)
+  serial: {
+    listPorts: () => ipcRenderer.invoke('serial:listPorts'),
+    /** Immediately release the port held by the serial pool for this host
+     * (also ends any active terminal session on it). Use to free a stuck
+     * COM port without restarting. */
+    releasePort: (hostId: string) => ipcRenderer.invoke('serial:releasePort', hostId),
   },
 
   // SFTP (file transfer)
