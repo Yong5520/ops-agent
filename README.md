@@ -2,7 +2,6 @@
 
 > AI 驱动的 Linux 运维 Agent 桌面客户端
 
-<!-- 占位图：替换为实际截图 docs/images/banner.svg -->
 <p align="center">
   <img src="docs/images/banner.png" alt="OpsAgent 主界面" width="880">
 </p>
@@ -23,21 +22,18 @@
 
 **交互式终端**
 
-<!-- 占位图：替换为实际截图 docs/images/terminal.svg -->
 ![交互式终端](docs/images/terminal.png)
 
 多标签 SSH + 本地终端（node-pty / ConPTY）、Ctrl+F 搜索、MobaXterm 风格右键菜单、导出、广播、命令片段库
 
 **文件传输 (SFTP)**
 
-<!-- 占位图：替换为实际截图 docs/images/sftp.svg -->
 ![SFTP 文件传输](docs/images/sftp.png)
 
 远程浏览、拖拽上传 / 下载、进度条、可取消、大文件流式
 
 **多主机管理**
 
-<!-- 占位图：替换为实际截图 docs/images/host-management.svg -->
 ![多主机管理](docs/images/host-management.png)
 
 SSH 连接池 + 断路器、堡垒机 / 跳板机（forward TCP 转发 / encoded 用户名编码）、agent 转发、主机密钥验证（TOFU）、主机文件夹分组 + 范围内 `@mention`、CSV/TSV 批量导入
@@ -46,7 +42,6 @@ SSH 连接池 + 断路器、堡垒机 / 跳板机（forward TCP 转发 / encoded
 
 ## 安全模式
 
-<!-- 占位图：替换为实际截图 docs/images/command-approval.svg -->
 ![命令逐条批准（Operator 模式）](docs/images/command-approval.png)
 
 | 层级 | 名称 | 行为 |
@@ -62,7 +57,7 @@ SSH 连接池 + 断路器、堡垒机 / 跳板机（forward TCP 转发 / encoded
 
 ## 技术栈
 
-Electron 31 · React 18 + TypeScript + Tailwind · Zustand · Vercel AI SDK 4.x · ssh2 · node-pty (ConPTY) · xterm.js 6 · better-sqlite3 (schema v14) · electron-vite + electron-builder · Vitest (900+ 测试)
+Electron 31 · React 18 + TypeScript + Tailwind · Zustand · Vercel AI SDK 4.x · ssh2 · node-pty (ConPTY) · xterm.js 6 · better-sqlite3 (schema v17) · electron-vite + electron-builder · Vitest (900+ 测试)
 
 ## 快速开始
 
@@ -87,13 +82,9 @@ npm run dist:win   # 打包 -> dist/OpsAgent-{version}-x64-setup.exe
 
 ## 配置
 
-<!-- 占位图：替换为实际截图 docs/images/settings.svg -->
 ![设置页 · 模型配置](docs/images/settings.png)
-![设置页 · 模型配置](docs/images/host-settings.png)
+![设置页 · 主机配置](docs/images/host-settings.png)
 应用内 **设置** 页：模型（端点 / Key / 模型名 / 单价，可测试连通性）、目标主机（分组 / 批量导入 / 堡垒机 / agent 转发 / 主机密钥）、安全模式、安全规则（编辑 `security-rules.json`）。主机凭据主密钥加密存于本地 SQLite，`master.key` 切勿提交。
-
-> **替换占位图**：以上图片为带标签的 SVG 占位（`docs/images/*.svg`）。把实际截图放入 `docs/images/`（建议 `.png`）后，将 README 中对应路径的 `.svg` 改为实际扩展名即可；若全部为 png，全局替换 `.svg)` → `.png)` 一次完成。
-
 ## 文档
 
 [PRD](docs/PRD.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [ARCHITECTURE_DETAILED](docs/ARCHITECTURE_DETAILED.md) · [ROADMAP_V2](docs/ROADMAP_V2.md) · [TASKS](docs/TASKS.md) · [SESSION_ACTIONS](docs/SESSION_ACTIONS.md) · [VERIFICATION_TASKS](docs/VERIFICATION_TASKS.md)
