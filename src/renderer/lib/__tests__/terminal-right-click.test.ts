@@ -2,27 +2,19 @@ import { describe, it, expect } from 'vitest';
 import { decideRightClickAction } from '../terminal-right-click.js';
 
 describe('decideRightClickAction', () => {
-  it('copies and inserts in quick mode when there is a selection', () => {
-    // jumpserver-style: right-click with a selection copies it to the
-    // clipboard AND inserts it at the cursor.
-    expect(decideRightClickAction(true, 'quick', false)).toBe('copyAndInsert');
+  it('copies (and clears the selection) on plain right-click with a selection', () => {
+    // Two-step MobaXterm/jumpserver flow: right-click with a selection only
+    // COPIES it (the view also clears the selection), so the second
+    // right-click - now with no selection - pastes from the clipboard.
+    expect(decideRightClickAction(true, false)).toBe('copy');
   });
 
-  it('pastes in quick mode when there is no selection', () => {
-    expect(decideRightClickAction(false, 'quick', false)).toBe('paste');
+  it('pastes on plain right-click with no selection', () => {
+    expect(decideRightClickAction(false, false)).toBe('paste');
   });
 
-  it('always opens the menu in menu mode regardless of selection', () => {
-    expect(decideRightClickAction(true, 'menu', false)).toBe('menu');
-    expect(decideRightClickAction(false, 'menu', false)).toBe('menu');
-  });
-
-  it('always opens the menu when Shift is held in quick mode', () => {
-    expect(decideRightClickAction(true, 'quick', true)).toBe('menu');
-    expect(decideRightClickAction(false, 'quick', true)).toBe('menu');
-  });
-
-  it('always opens the menu when Shift is held in menu mode', () => {
-    expect(decideRightClickAction(false, 'menu', true)).toBe('menu');
+  it('always opens the menu when Shift is held, regardless of selection', () => {
+    expect(decideRightClickAction(true, true)).toBe('menu');
+    expect(decideRightClickAction(false, true)).toBe('menu');
   });
 });

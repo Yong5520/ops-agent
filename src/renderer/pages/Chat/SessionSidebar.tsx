@@ -5,6 +5,8 @@ import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { cn } from '../../lib/cn.js';
 import { groupHostsByFolder } from '../../utils/host-groups.js';
+import { filterHosts } from '../../utils/host-search.js';
+import { SearchInput } from '../../components/SearchInput.js';
 import type { SafetyMode } from '../../../shared/types.js';
 
 const SAFETY_MODES: Array<{ value: SafetyMode; label: string }> = [
@@ -50,6 +52,7 @@ export function SessionSidebar() {
   } = useSessionStore();
   const { hosts, groups, load: loadHosts } = useHostStore();
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
+  const [hostQuery, setHostQuery] = useState('');
 
   useEffect(() => {
     load();
@@ -69,7 +72,12 @@ export function SessionSidebar() {
     saveCollapsedGroups(next);
   };
 
-  const hostGroups = groupHostsByFolder(hosts, groups);
+  // Filter before grouping so groups with no matches drop out naturally
+  // (same pattern as the Terminal / Host Config pages, v20). Force-expand
+  // every group while searching so matches are never hidden behind a
+  // collapsed header; the saved collapse state is untouched.
+  const isSearching = hostQuery.trim().length > 0;
+  const hostGroups = groupHostsByFolder(filterHosts(hosts, hostQuery), groups);
 
   return (
     <div className="flex w-64 min-h-0 flex-col border-r border-zinc-800 bg-zinc-950">
@@ -78,7 +86,7 @@ export function SessionSidebar() {
         <Button
           variant="primary"
           className="w-full"
-          onClick={() => createSession({ hostIds, safetyMode })}
+          onClick={() => createSession({ hostIds: [], safetyMode })}
         >
           + 新建会话
         </Button>
@@ -89,10 +97,20 @@ export function SessionSidebar() {
         <div className="space-y-2 border-y border-zinc-800 px-3 py-3">
           <div>
             <label className="mb-1 block text-xs text-zinc-500">目标主机（可多选）</label>
+            <div className="mb-1.5">
+              <SearchInput
+                value={hostQuery}
+                onChange={setHostQuery}
+                placeholder="搜索主机名称 / IP"
+              />
+            </div>
             <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900 p-1.5">
               {hosts.length === 0 && <p className="px-1 py-1 text-xs text-zinc-600">未配置主机</p>}
+              {hosts.length > 0 && hostGroups.length === 0 && (
+                <p className="px-1 py-1 text-xs text-zinc-600">未找到匹配的主机</p>
+              )}
               {hostGroups.map(({ group, hosts: groupHosts }) => {
-                const isCollapsed = collapsedGroups.has(group);
+                const isCollapsed = isSearching ? false : collapsedGroups.has(group);
                 const selectedInGroup = groupHosts.filter((h) => hostIds.includes(h.id)).length;
                 return (
                   <div key={group}>

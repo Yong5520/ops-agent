@@ -120,6 +120,13 @@ export const Channels = {
     AUTHORIZATION_RESPONSE: 'agent:authorization-response',
     PLAN_APPROVAL_RESPONSE: 'agent:plan-approval-response',
     ASK_USER_RESPONSE: 'agent:ask-user-response',
+    // v24 activity mirror: renderer -> main, fetch buffered mirror history
+    // (for replay when a mirror window opens mid-run).
+    MIRROR_HISTORY: 'agent:mirror-history',
+    // v24 activity mirror: main -> renderer, live raw-channel mirror events.
+    MIRROR_EVENT: 'agent:mirror-event',
+    // v24 activity mirror: renderer -> main, open a standalone mirror window.
+    MIRROR_OPEN_WINDOW: 'agent:mirror-open-window',
   },
   Tasks: {
     LIST: 'tasks:list',

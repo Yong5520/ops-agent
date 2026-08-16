@@ -207,6 +207,17 @@ const api: OpsAgentApi = {
       ipcRenderer.on('agent:steer-consumed', listener);
       return () => ipcRenderer.removeListener('agent:steer-consumed', listener);
     },
+    // v24 activity mirror
+    openMirrorWindow: (sessionId?: string) =>
+      ipcRenderer.invoke('agent:mirror-open-window', sessionId),
+    mirrorHistory: (sessionId?: string, hostId?: string) =>
+      ipcRenderer.invoke('agent:mirror-history', sessionId, hostId),
+    onMirrorEvent: (handler) => {
+      const listener = (_e: unknown, event: unknown) =>
+        handler(event as Parameters<typeof handler>[0]);
+      ipcRenderer.on('agent:mirror-event', listener);
+      return () => ipcRenderer.removeListener('agent:mirror-event', listener);
+    },
   },
 
   // Tasks (TodoWrite)

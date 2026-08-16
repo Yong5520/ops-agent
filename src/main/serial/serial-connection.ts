@@ -21,6 +21,7 @@ import { stripAnsi, stripPagerArtifacts, createPagerAdvancer } from '../ssh/page
 import { resolveSerialOptions, type ResolvedSerialOptions } from './serial-options.js';
 import { detectBootPrompt, endsWithCliPrompt } from './serial-prompts.js';
 import { createLoginDriver } from './login-state-machine.js';
+import { activityMirrorRecord } from '../agent/activity-mirror.js';
 import { logger } from '../utils/logger.js';
 
 /** The subset of serialport's API the manager uses (structural - FakeSerialPort
@@ -94,6 +95,10 @@ export class SerialConnectionManager {
   private port: SerialPortLike | null = null;
   private connected = false;
   private closeRequested = false;
+  // v24 activity mirror: session context stamped by the host-command runner
+  // before each exec so the mirror subscriber can scope raw output to a
+  // session. '' = shared bucket (shown in every view).
+  mirrorSessionId: string = '';
   // Notified when the port closes unexpectedly (unplug / another program took
   // the port) - NOT on our own close(). The terminal uses this to surface an
   // exit event.
@@ -344,6 +349,15 @@ export class SerialConnectionManager {
           return;
         }
         advancer.consumeChunk(chunk);
+        // v24 activity mirror: record the RAW console chunk (uncleaned) so
+        // the mirror terminal shows exactly what the console produced.
+        activityMirrorRecord({
+          kind: 'chunk',
+          sessionId: this.mirrorSessionId,
+          hostId: this.id,
+          stream: 'stdout',
+          data: chunk,
+        });
         opts.onStream?.({ stream: 'stdout', data: stripPagerArtifacts(stripAnsi(chunk)) });
         sawPrompt = sawPrompt || endsWithCliPrompt(buffer);
         // Quiet-period guard: a prompt seen AND output quiet -> command done.

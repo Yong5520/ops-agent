@@ -20,6 +20,8 @@ import type {
 } from '../../shared/types.js';
 import type { AskUserQuestionItem, AskUserAnswer } from '../agent/tools/ask-user.js';
 import type { SessionCostTotal } from '../storage/cost-store.js';
+import type { AgentMirrorEvent } from '../../shared/activity-mirror-types.js';
+export type { AgentMirrorEvent };
 
 // Strongly-typed surface exposed to the renderer via contextBridge.
 // The renderer accesses these as `window.opsAgent.*`.
@@ -201,6 +203,9 @@ export interface AgentSteerConsumedEvent {
   sessionId: string;
   msgIds: string[];
 }
+
+// v24 activity mirror: AgentMirrorEvent is imported from
+// ../../shared/activity-mirror-types.js (re-exported above).
 
 export interface AgentCompactResult {
   ok: boolean;
@@ -446,6 +451,13 @@ export interface OpsAgentApi {
     onAskUserRequest: (handler: (event: AgentAskUserRequestEvent) => void) => () => void;
     onContextUsage: (handler: (event: AgentContextUsageEvent) => void) => () => void;
     onSteerConsumed: (handler: (event: AgentSteerConsumedEvent) => void) => () => void;
+    // v24 activity mirror
+    /** Open a standalone read-only AI activity-terminal window. */
+    openMirrorWindow: (sessionId?: string) => Promise<{ ok: boolean }>;
+    /** Fetch buffered mirror history (replay on window open). */
+    mirrorHistory: (sessionId?: string, hostId?: string) => Promise<AgentMirrorEvent[]>;
+    /** Live raw-channel mirror events (main -> renderer). */
+    onMirrorEvent: (handler: (event: AgentMirrorEvent) => void) => () => void;
   };
 
   tasks: {

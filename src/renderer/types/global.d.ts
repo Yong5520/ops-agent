@@ -22,6 +22,7 @@ import type {
   Hook,
   HookCreateInput,
 } from '../shared/types.js';
+import type { AgentMirrorEvent } from '../shared/activity-mirror-types.js';
 
 interface AgentRunRequest {
   sessionId: string;
@@ -179,6 +180,9 @@ interface AgentSteerConsumedEvent {
   sessionId: string;
   msgIds: string[];
 }
+
+// v24 activity mirror: AgentMirrorEvent is imported from
+// ../shared/activity-mirror-types.js (above).
 
 interface AgentCompactResult {
   ok: boolean;
@@ -455,6 +459,10 @@ interface OpsAgentApi {
     onAskUserRequest: (handler: (event: AgentAskUserRequestEvent) => void) => () => void;
     onContextUsage: (handler: (event: AgentContextUsageEvent) => void) => () => void;
     onSteerConsumed: (handler: (event: AgentSteerConsumedEvent) => void) => () => void;
+    // v24 activity mirror
+    openMirrorWindow: (sessionId?: string) => Promise<{ ok: boolean }>;
+    mirrorHistory: (sessionId?: string, hostId?: string) => Promise<AgentMirrorEvent[]>;
+    onMirrorEvent: (handler: (event: AgentMirrorEvent) => void) => () => void;
   };
   tasks: {
     list: (sessionId: string) => Promise<TodoItem[]>;

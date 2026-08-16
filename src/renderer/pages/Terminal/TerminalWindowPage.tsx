@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { TerminalView } from './TerminalView.js';
 import { Button } from '../../components/Button.js';
+import { resolveExitAction } from '../../lib/terminal-exit.js';
 
 interface TerminalWindowPageProps {
   hostId: string;
@@ -66,6 +67,12 @@ export function TerminalWindowPage({ hostId }: TerminalWindowPageProps) {
     // multiple subscribers).
     const offExit = window.opsAgent.terminal.onExit((sid, info) => {
       if (sid !== sessionRef.current) return;
+      if (resolveExitAction(info.reason) === 'close-tab') {
+        // The user exited the shell (exit/logout/Ctrl+D) - close the window
+        // (its 'closed' handler in the main process kills the session).
+        window.close();
+        return;
+      }
       if (info.reason === 'reconnecting') {
         setStatus('connecting');
       } else {

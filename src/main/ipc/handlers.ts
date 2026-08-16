@@ -1,4 +1,4 @@
-import { ipcMain, shell, type BrowserWindow } from 'electron';
+import { ipcMain, shell, BrowserWindow } from 'electron';
 import { Channels } from './channels.js';
 import { createCancellablePending } from './cancellable-pending.js';
 import { logger } from '../utils/logger.js';
@@ -17,6 +17,10 @@ import {
 import { hooksStore } from '../storage/hooks.js';
 import { taskListsStore } from '../storage/task-lists.js';
 import { runAgentLoop } from '../agent/loop.js';
+import { resolveQuickCommandHost } from '../agent/quick-command-host.js';
+import { activityMirrorSubscribe, activityMirrorHistory } from '../agent/activity-mirror.js';
+import { mirrorEventTargets } from './mirror-routing.js';
+import { createActivityMirrorWindow, getActivityMirrorWindowIds } from '../window-manager.js';
 import { exportSessionToMarkdown } from '../agent/export.js';
 import {
   clearSummaryCache,
@@ -93,8 +97,35 @@ const activeLoops = new Map<string, AbortController>();
 
 let mainWindow: BrowserWindow | null = null;
 
+/** Ids of all currently-alive BrowserWindows (mirror event fan-out). */
+function allAliveWindowIds(): Set<number> {
+  const ids = new Set<number>();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) ids.add(win.id);
+  }
+  return ids;
+}
+
 export function registerIpcHandlers(win: BrowserWindow): void {
   mainWindow = win;
+
+  // v24 activity mirror: fan raw-channel mirror events out to every window
+  // that renders them (the main window's side panel + any open activity
+  // windows). Deduplicate by window id; a destroyed window's send is skipped.
+  activityMirrorSubscribe((event) => {
+    const targets = mirrorEventTargets({
+      mainWindowId: mainWindow?.id ?? -1,
+      mirrorWindowIds: getActivityMirrorWindowIds(),
+      allWindowIds: allAliveWindowIds(),
+    });
+    for (const id of targets) {
+      const target = BrowserWindow.fromId(id);
+      if (target && !target.isDestroyed()) {
+        target.webContents.send(Channels.Agent.MIRROR_EVENT, event);
+      }
+    }
+  });
+
   // ---------- System ----------
   ipcMain.handle(Channels.System.PING, async () => {
     logger.debug('ping received');
@@ -292,6 +323,21 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(Channels.Hooks.DELETE, async (_e, id: string) => hooksStore.delete(id));
 
   // ---------- Agent ----------
+  // v24 activity mirror: replay buffered history (scoped to a session and
+  // host bucket) so a newly-opened mirror window shows past activity.
+  ipcMain.handle(
+    Channels.Agent.MIRROR_HISTORY,
+    async (_e, sessionId: string | undefined, hostId: string | undefined) => {
+      return activityMirrorHistory(sessionId, hostId);
+    },
+  );
+
+  // v24 activity mirror: open a standalone read-only mirror window.
+  ipcMain.handle(Channels.Agent.MIRROR_OPEN_WINDOW, async (_e, sessionId?: string) => {
+    createActivityMirrorWindow(sessionId);
+    return { ok: true };
+  });
+
   ipcMain.handle(Channels.Agent.RUN, async (_e, request: AgentRunRequest) => {
     if (!mainWindow) {
       throw new Error('Main window not available');
@@ -657,21 +703,19 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   // message and the AI interpreted it as a work request.
   ipcMain.handle(
     Channels.Agent.QUICK_COMMAND,
-    async (_e, _sessionId: string, command: string, hostName?: string) => {
+    async (_e, sessionId: string, command: string, hostName?: string) => {
       try {
-        // Resolve host
-        let host;
-        if (hostName) {
-          host = hostsStore.getByName(hostName);
-        } else {
-          // Use the first available host if none specified
-          const allHosts = hostsStore.list();
-          host = allHosts[0] ?? null;
-        }
+        // Resolve host. v24: without an explicit @host, run on the session's
+        // first selected host - never silently fall back to the first host
+        // in the DB (that executed commands on an arbitrary machine).
+        const session = sessionsStore.getSession(sessionId);
+        const host = resolveQuickCommandHost(hostName, session?.hostIds, hostsStore.list());
         if (!host) {
           return {
             ok: false,
-            error: hostName ? `主机 '${hostName}' 不存在` : '未配置任何主机',
+            error: hostName
+              ? `主机 '${hostName}' 不存在`
+              : '未选择目标主机，请先在会话侧边栏勾选目标主机（或使用 @主机名 指定）',
           };
         }
 

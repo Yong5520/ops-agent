@@ -1,31 +1,24 @@
 // Right-click behavior helpers for the terminal.
 //
-// MobaXterm/jumpserver-style smart right-click: in "quick" mode a plain
-// right-click with a selection copies it to the clipboard AND inserts it at
-// the cursor (so a selected snippet can be dropped straight onto the command
-// line), while a plain right-click with no selection pastes from the
-// clipboard - no menu, no focus loss. Shift+right-click always opens the full
-// menu (search / clear / export / upload / download) so power-user actions
-// stay reachable. In "menu" mode a plain right-click opens the menu directly
-// (legacy behavior).
+// MobaXterm/jumpserver-style smart right-click (fixed behavior, not
+// configurable): a plain right-click with a selection copies it to the
+// clipboard (the view also clears the selection), while a plain right-click
+// with no selection pastes from the clipboard - no menu, no focus loss. This
+// gives the two-step flow: right-click copies + deselects, right-click again
+// pastes. Shift+right-click always opens the full menu (search / clear /
+// export / upload / download) so power-user actions stay reachable.
 
-export type RightClickMode = 'quick' | 'menu';
-export type RightClickAction = 'copyAndInsert' | 'paste' | 'menu';
+export type RightClickAction = 'copy' | 'paste' | 'menu';
 
 /**
  * Decide what a right-click should do.
  *
  * @param hasSelection  whether the terminal currently has a text selection
- * @param mode          the user's preferred right-click mode
  * @param shiftKey      whether Shift was held during the right-click
  */
-export function decideRightClickAction(
-  hasSelection: boolean,
-  mode: RightClickMode,
-  shiftKey: boolean,
-): RightClickAction {
+export function decideRightClickAction(hasSelection: boolean, shiftKey: boolean): RightClickAction {
   // Shift+right-click always opens the menu so power-user actions stay reachable.
-  if (shiftKey || mode === 'menu') return 'menu';
-  // Quick mode: copy+insert when there is a selection, paste otherwise.
-  return hasSelection ? 'copyAndInsert' : 'paste';
+  if (shiftKey) return 'menu';
+  // Plain right-click: copy when there is a selection, paste otherwise.
+  return hasSelection ? 'copy' : 'paste';
 }

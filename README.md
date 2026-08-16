@@ -2,11 +2,16 @@
 
 > AI 驱动的 Linux 运维 Agent 桌面客户端
 
+<!-- 占位图：替换为实际截图 docs/images/banner.svg -->
+<p align="center">
+  <img src="docs/images/banner.png" alt="OpsAgent 主界面" width="880">
+</p>
+
 通过自然语言对话让 AI 自动连接 Linux 主机进行诊断、分析与修复，内置交互式终端、SFTP 文件传输、命令片段库。无需 Claude Code，配置 API Key 或本地模型地址即可使用。基于 [ssh-mcp-multi](https://github.com/Yong5520/ssh-mcp-multi) 产品化而来。
 
 ## 核心特性
 
-**AI 运维 Agent**
+**AI 运维 Agent** _(见上方主图)_
 - 自建 Agent Loop（Vercel AI SDK），支持 Anthropic / OpenAI / 任意 OpenAI 兼容端点（Ollama / vLLM / GLM / Qwen 等），每会话可独立切换模型
 - 四级安全模式 + 29 条可配置危险命令拦截规则，管道感知 / 命令位置感知 / 子 shell 递归检查防绕过
 - 完全审计 + 审计链防篡改；写入前自动备份，一键回滚
@@ -16,15 +21,33 @@
 - 上下文压缩（85% 自动 / `/compact`）、任务清单 + 任务续接、循环韧性、思考块可视化、多模态图片附件
 - 结构化运维工具：tail_log / search_logs / journal_query / process_list / service_status / disk_analysis / network_connections 等（参数自动转义）
 
-**交互式终端** — 多标签 SSH + 本地终端（node-pty / ConPTY）、Ctrl+F 搜索、MobaXterm 风格右键菜单、导出、广播、命令片段库
+**交互式终端**
 
-**文件传输 (SFTP)** — 远程浏览、拖拽上传 / 下载、进度条、可取消、大文件流式
+<!-- 占位图：替换为实际截图 docs/images/terminal.svg -->
+![交互式终端](docs/images/terminal.png)
 
-**多主机管理** — SSH 连接池 + 断路器、堡垒机 / 跳板机（forward TCP 转发 / encoded 用户名编码）、agent 转发、主机密钥验证（TOFU）、主机文件夹分组 + 范围内 `@mention`、CSV/TSV 批量导入
+多标签 SSH + 本地终端（node-pty / ConPTY）、Ctrl+F 搜索、MobaXterm 风格右键菜单、导出、广播、命令片段库
 
-**扩展能力** — 技能系统（SKILL.md 渐进式披露，`/skillName` 调用，AI 自助安装）、Hooks（PreToolUse 拦截 / 改写，PostToolUse 追加上下文，command / http 类型）
+**文件传输 (SFTP)**
+
+<!-- 占位图：替换为实际截图 docs/images/sftp.svg -->
+![SFTP 文件传输](docs/images/sftp.png)
+
+远程浏览、拖拽上传 / 下载、进度条、可取消、大文件流式
+
+**多主机管理**
+
+<!-- 占位图：替换为实际截图 docs/images/host-management.svg -->
+![多主机管理](docs/images/host-management.png)
+
+SSH 连接池 + 断路器、堡垒机 / 跳板机（forward TCP 转发 / encoded 用户名编码）、agent 转发、主机密钥验证（TOFU）、主机文件夹分组 + 范围内 `@mention`、CSV/TSV 批量导入
+
+**扩展能力** - 技能系统（SKILL.md 渐进式披露，`/skillName` 调用，AI 自助安装）、Hooks（PreToolUse 拦截 / 改写，PostToolUse 追加上下文，command / http 类型）
 
 ## 安全模式
+
+<!-- 占位图：替换为实际截图 docs/images/command-approval.svg -->
+![命令逐条批准（Operator 模式）](docs/images/command-approval.png)
 
 | 层级 | 名称 | 行为 |
 |------|------|------|
@@ -56,15 +79,20 @@ npm run dist:win   # 打包 -> dist/OpsAgent-{version}-x64-setup.exe
 
 - **下载**：[GitHub Releases](https://github.com/Yong5520/ops-agent/releases/latest) · 直链 [OpsAgent-0.1.0-x64-setup.exe](https://github.com/Yong5520/ops-agent/releases/download/v0.1.0/OpsAgent-0.1.0-x64-setup.exe)（约 89 MB）
 - **文件**：`OpsAgent-{version}-x64-setup.exe`（NSIS · Windows x64 · 当前 0.1.0），也可由 `npm run dist:win` 本地生成于 `dist/`
-- **安装**：双击运行 → 选择安装目录（可更改，按用户安装无需管理员）→ 自动创建桌面快捷方式 + 开始菜单「OpsAgent」
+- **安装**：双击运行 -> 选择安装目录（可更改，按用户安装无需管理员）-> 自动创建桌面快捷方式 + 开始菜单「OpsAgent」
 - **语言**：中文 / 英文
 - **卸载**：系统「设置 - 应用」或安装目录下的卸载程序
 - **首次启动**：在「设置」页配置模型与目标主机（见下文「配置」）
-- ⚠️ 未代码签名，首次运行 Windows SmartScreen 可能提示「未知发布者」，点击「更多信息 → 仍要运行」即可
+- ⚠️ 未代码签名，首次运行 Windows SmartScreen 可能提示「未知发布者」，点击「更多信息 -> 仍要运行」即可
 
 ## 配置
 
+<!-- 占位图：替换为实际截图 docs/images/settings.svg -->
+![设置页 · 模型配置](docs/images/settings.png)
+![设置页 · 模型配置](docs/images/host-settings.png)
 应用内 **设置** 页：模型（端点 / Key / 模型名 / 单价，可测试连通性）、目标主机（分组 / 批量导入 / 堡垒机 / agent 转发 / 主机密钥）、安全模式、安全规则（编辑 `security-rules.json`）。主机凭据主密钥加密存于本地 SQLite，`master.key` 切勿提交。
+
+> **替换占位图**：以上图片为带标签的 SVG 占位（`docs/images/*.svg`）。把实际截图放入 `docs/images/`（建议 `.png`）后，将 README 中对应路径的 `.svg` 改为实际扩展名即可；若全部为 png，全局替换 `.svg)` → `.png)` 一次完成。
 
 ## 文档
 

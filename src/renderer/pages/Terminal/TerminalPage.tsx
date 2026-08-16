@@ -9,6 +9,7 @@ import { AiCommandBar } from './AiCommandBar.js';
 import { SearchInput } from '../../components/SearchInput.js';
 import { cn } from '../../lib/cn.js';
 import { filterHosts } from '../../utils/host-search.js';
+import { resolveExitAction } from '../../lib/terminal-exit.js';
 import type { HostConfig } from '../../../shared/types.js';
 
 // Collapsed group state for the terminal host list
@@ -61,13 +62,38 @@ export function TerminalPage() {
     loadHosts();
   }, [loadHosts]);
 
-  // Listen for terminal exit events to update tab status
+  // Page-level terminal exit/reconnect listeners (v24). These MUST live at
+  // the page level, not inside TerminalView: when a tab enters the
+  // 'reconnecting' state, TerminalView is unmounted (replaced by the
+  // reconnecting overlay) and its own listeners are torn down - so a
+  // subsequent terminal:reconnect / terminal:exit would arrive with no
+  // receiver and the tab would be stuck on "正在重连" forever. The preload
+  // supports multiple subscribers, so TerminalView keeps its own copy purely
+  // to write the visual banners into the xterm buffer.
   useEffect(() => {
-    const removeExitListener = window.opsAgent.terminal.onExit((sessionId) => {
-      updateTabStatus(sessionId, 'disconnected');
+    const removeExitListener = window.opsAgent.terminal.onExit((sessionId, info) => {
+      switch (resolveExitAction(info.reason)) {
+        case 'close-tab':
+          // The user exited the shell (exit/logout/Ctrl+D) - close the tab
+          // automatically instead of leaving a dead tab behind.
+          closeTab(sessionId);
+          break;
+        case 'reconnecting':
+          updateTabStatus(sessionId, 'reconnecting');
+          break;
+        default:
+          updateTabStatus(sessionId, 'disconnected');
+          break;
+      }
     });
-    return () => removeExitListener();
-  }, [updateTabStatus]);
+    const removeReconnectListener = window.opsAgent.terminal.onReconnect((sessionId) => {
+      updateTabStatus(sessionId, 'connected');
+    });
+    return () => {
+      removeExitListener();
+      removeReconnectListener();
+    };
+  }, [updateTabStatus, closeTab]);
 
   // Ctrl+Shift+T opens a local terminal tab (works even with no host connected,
   // so a user who only wants a local cmd/PowerShell can start one).

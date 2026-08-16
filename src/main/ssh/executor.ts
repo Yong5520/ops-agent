@@ -5,6 +5,7 @@ import type { ExecResult, ExecStreamCallback } from './types.js';
 import type { ClientChannel } from 'ssh2';
 import { createPagerAdvancer, stripPagerArtifacts, stripAnsi, PAGER_ADVANCE_KEY } from './pager.js';
 import { getDeviceProfile } from './device-profiles.js';
+import { activityMirrorRecord } from '../agent/activity-mirror.js';
 
 // Command executor — extracted from ssh-mcp-multi execSshCommand (lines 520-569)
 // with the following changes:
@@ -136,11 +137,27 @@ export async function execCommand(
         const chunk = data.toString();
         stdout += chunk;
         advancer.consumeChunk(chunk);
+        // v24 activity mirror: record the RAW chunk (uncleaned) so the
+        // mirror terminal shows exactly what the AI's channel received.
+        activityMirrorRecord({
+          kind: 'chunk',
+          sessionId: manager.mirrorSessionId ?? '',
+          hostId: manager.id,
+          stream: 'stdout',
+          data: chunk,
+        });
         onStream?.({ stream: 'stdout', data: clean(chunk) });
       });
       stream.stderr.on('data', (data: Buffer) => {
         const chunk = data.toString();
         stderr += chunk;
+        activityMirrorRecord({
+          kind: 'chunk',
+          sessionId: manager.mirrorSessionId ?? '',
+          hostId: manager.id,
+          stream: 'stderr',
+          data: chunk,
+        });
         onStream?.({ stream: 'stderr', data: chunk });
       });
       stream.on('exit', (code: number | null) => {

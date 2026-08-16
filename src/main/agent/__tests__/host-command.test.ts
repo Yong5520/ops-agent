@@ -96,15 +96,13 @@ describe('runHostCommand', () => {
   });
 
   it('uses the serial pool + manager.exec for serial hosts', async () => {
-    const exec = vi
-      .fn()
-      .mockResolvedValue({
-        stdout: 'vrp',
-        stderr: '',
-        exitCode: null,
-        durationMs: 9,
-        viaSuShell: false,
-      });
+    const exec = vi.fn().mockResolvedValue({
+      stdout: 'vrp',
+      stderr: '',
+      exitCode: null,
+      durationMs: 9,
+      viaSuShell: false,
+    });
     serialPool.get.mockResolvedValue({ exec });
     const result = await runHostCommand(serialHost(), 'display version');
     expect(serialPool.get).toHaveBeenCalledWith('s1');
@@ -128,7 +126,14 @@ describe('runHostCommand', () => {
       viaSuShell: false,
     });
     await runHostCommand(sshHost(), 'ls', onStream, signal);
-    expect(sshExec).toHaveBeenCalledWith({}, 'ls', onStream, signal);
+    // The runner stamps the pooled manager with a mirrorSessionId for the v24
+    // activity mirror, so match by shape rather than a fresh empty object.
+    expect(sshExec).toHaveBeenCalledWith(
+      expect.objectContaining({ mirrorSessionId: '' }),
+      'ls',
+      onStream,
+      signal,
+    );
   });
 });
 
@@ -148,15 +153,13 @@ describe('runHostSudoCommand', () => {
   });
 
   it('runs the command directly (no sudo layer) for serial hosts', async () => {
-    const exec = vi
-      .fn()
-      .mockResolvedValue({
-        stdout: '',
-        stderr: '',
-        exitCode: null,
-        durationMs: 0,
-        viaSuShell: false,
-      });
+    const exec = vi.fn().mockResolvedValue({
+      stdout: '',
+      stderr: '',
+      exitCode: null,
+      durationMs: 0,
+      viaSuShell: false,
+    });
     serialPool.get.mockResolvedValue({ exec });
     await runHostSudoCommand(serialHost(), 'reboot');
     expect(exec).toHaveBeenCalledWith('reboot', { onStream: undefined, signal: undefined });

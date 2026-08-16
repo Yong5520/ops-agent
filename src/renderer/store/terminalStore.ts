@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import type { HostConfig } from '../../shared/types.js';
-import type { RightClickMode } from '../lib/terminal-right-click.js';
 
 export interface TerminalTab {
   sessionId: string;
@@ -99,27 +98,9 @@ function saveCustomSnippets(snippets: CommandSnippet[]): void {
   }
 }
 
-// ── Right-click mode persistence ───────────────────────────────────────────
-// MobaXterm-style: 'quick' = right-click copies/pastes directly (default),
-// 'menu' = right-click opens the context menu. Shift+right-click always
-// opens the menu regardless of this setting.
-const RIGHT_CLICK_MODE_KEY = 'opsagent.terminal.rightClickMode';
-function loadRightClickMode(): RightClickMode {
-  try {
-    const raw = localStorage.getItem(RIGHT_CLICK_MODE_KEY);
-    if (raw === 'quick' || raw === 'menu') return raw;
-  } catch {
-    // ignore
-  }
-  return 'quick';
-}
-function saveRightClickMode(mode: RightClickMode): void {
-  try {
-    localStorage.setItem(RIGHT_CLICK_MODE_KEY, mode);
-  } catch {
-    // ignore
-  }
-}
+// Right-click behavior is fixed (jumpserver-style): plain right-click
+// copies/pastes directly, Shift+right-click opens the menu. There is no
+// longer a persisted mode preference.
 
 interface TerminalStore {
   tabs: TerminalTab[];
@@ -128,10 +109,6 @@ interface TerminalStore {
   // Broadcast mode
   broadcastMode: boolean;
   toggleBroadcast: () => void;
-
-  // Right-click behavior (MobaXterm-style quick copy/paste vs menu)
-  rightClickMode: RightClickMode;
-  setRightClickMode: (mode: RightClickMode) => void;
 
   // Snippets
   builtinSnippets: CommandSnippet[];
@@ -157,12 +134,6 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   customSnippets: loadCustomSnippets(),
 
   toggleBroadcast: () => set({ broadcastMode: !get().broadcastMode }),
-
-  rightClickMode: loadRightClickMode(),
-  setRightClickMode: (mode) => {
-    saveRightClickMode(mode);
-    set({ rightClickMode: mode });
-  },
 
   addSnippet: (snippet) => {
     const newSnippet: CommandSnippet = {

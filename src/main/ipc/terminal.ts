@@ -7,10 +7,13 @@ import {
   MAX_RECONNECT_ATTEMPTS,
   shouldAttemptReconnect,
 } from '../ssh/reconnect.js';
+import { markShellExited, exitReason } from '../ssh/shell-exit.js';
 import { generateCommand } from '../agent/ai-command.js';
 import { logger } from '../utils/logger.js';
 import { uploadFile, downloadFile, listDir, getSftp } from '../ssh/sftp.js';
 import type { DirEntry } from '../ssh/sftp.js';
+import { retrySftpOnce } from '../ssh/sftp-retry.js';
+import { isSshConnectionError } from '../ssh/connection-errors.js';
 import { createTerminalWindow } from '../window-manager.js';
 import { sendToOwner, killSessionsForWindow } from './terminal-routing.js';
 import { hostsStore } from '../storage/hosts.js';
@@ -47,6 +50,9 @@ interface TerminalSession {
   serialManager?: SerialConnectionManager | null;
   serialUnsubscribe?: (() => void) | null;
   closed: boolean;
+  // True once the ssh2 channel 'exit' event arrived (user typed exit/logout
+  // or Ctrl+D) - distinguishes a clean shell exit from a network drop.
+  shellExited: boolean;
   reconnecting: boolean;
   lastCols: number;
   lastRows: number;
@@ -56,6 +62,10 @@ interface TerminalSession {
 const sessions = new Map<string, TerminalSession>();
 // Active SFTP transfers keyed by transferId for cancel/pause support
 const activeTransfers = new Map<string, AbortController>();
+// conn.shell() during a reconnect attempt gets this long to open the channel;
+// past it the attempt counts as failed (a half-dead connection would
+// otherwise leave the callback - and the reconnect loop - pending forever).
+const SHELL_OPEN_TIMEOUT_MS = 15_000;
 let mainWindow: BrowserWindow | null = null;
 
 // Multi-window routing helpers (sendToOwner / killSessionsForWindow) live in
@@ -138,6 +148,7 @@ async function startSerialTerminalSession(
       }
     }),
     closed: false,
+    shellExited: false,
     reconnecting: false,
     lastCols: 80,
     lastRows: 24,
@@ -201,9 +212,31 @@ async function attemptReconnect(session: TerminalSession): Promise<void> {
       const conn = mgr.getConnection();
 
       const reconnected = await new Promise<boolean>((resolve) => {
+        // The shell() callback has no built-in timeout - a half-dead TCP
+        // connection can leave it pending forever, freezing the reconnect
+        // loop. Treat a silent 15s as a failed attempt; a late callback
+        // destroys its stream to avoid leaking a channel.
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          logger.warn(`[Terminal] Reconnect shell open timed out for ${session.hostName}`);
+          resolve(false);
+        }, SHELL_OPEN_TIMEOUT_MS);
         conn.shell(
           { term: 'xterm-256color', cols: session.lastCols, rows: session.lastRows },
           (err, stream) => {
+            if (settled) {
+              try {
+                (stream as unknown as { close?: () => void }).close?.();
+                (stream as unknown as { destroy?: () => void }).destroy?.();
+              } catch {
+                // ignore
+              }
+              return;
+            }
+            settled = true;
+            clearTimeout(timer);
             if (err) {
               logger.warn(
                 `[Terminal] Reconnect shell failed on ${session.hostName}: ${err.message}`,
@@ -237,6 +270,11 @@ async function attemptReconnect(session: TerminalSession): Promise<void> {
               }
             });
 
+            // Same user-exit detection as the initial shell (see terminal:start)
+            stream.on('exit', () => {
+              markShellExited(session);
+            });
+
             stream.on('close', () => {
               if (session.closed) {
                 session.stream = null;
@@ -244,7 +282,7 @@ async function attemptReconnect(session: TerminalSession): Promise<void> {
                 unmarkTerminalActive(session.hostId);
                 sendToOwner(session, CHANNELS.EXIT, session.sessionId, {
                   hostName: session.hostName,
-                  reason: 'Stream closed',
+                  reason: exitReason(session),
                 });
                 logger.info(
                   `[Terminal] Session ${session.sessionId} on ${session.hostName} closed by user`,
@@ -344,6 +382,7 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
               stream.setWindow(rows, cols, height, width),
           },
           closed: false,
+          shellExited: false,
           reconnecting: false,
           lastCols: 80,
           lastRows: 24,
@@ -357,17 +396,29 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
           }
         });
 
+        // User-initiated shell exit (typed `exit`/`logout` or Ctrl+D): ssh2
+        // emits the channel's 'exit' event - with the remote exit status -
+        // BEFORE 'close'. Mark the session so the 'close' handler below takes
+        // the clean-exit path and reports 'shell-exited' (the renderer
+        // auto-closes the tab) instead of looping reconnect attempts. A
+        // network drop never produces this event.
+        stream.on('exit', () => {
+          markShellExited(session);
+          logger.info(`[Terminal] Shell on ${hostName} exited by user (session ${sessionId})`);
+        });
+
         stream.on('close', () => {
-          // User-initiated close (via terminal:kill) -> clean exit, no reconnect
+          // User-initiated close (via terminal:kill) or normal shell exit ->
+          // clean exit, no reconnect
           if (session.closed) {
             session.stream = null;
             sessions.delete(sessionId);
             unmarkTerminalActive(hostId);
             sendToOwner(session, CHANNELS.EXIT, sessionId, {
               hostName,
-              reason: 'Stream closed',
+              reason: exitReason(session),
             });
-            logger.info(`[Terminal] Session ${sessionId} on ${hostName} closed by user`);
+            logger.info(`[Terminal] Session ${sessionId} on ${hostName} closed (clean)`);
             return;
           }
           // Unexpected close -> attempt auto-reconnect
@@ -423,6 +474,7 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
       },
       pty: ptyProcess,
       closed: false,
+      shellExited: false,
       reconnecting: false,
       lastCols: 80,
       lastRows: 24,
@@ -446,7 +498,9 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
       exitDisposable.dispose();
       sendToOwner(session, CHANNELS.EXIT, sessionId, {
         hostName: session.hostName,
-        reason: `Process exited with code ${exitCode}`,
+        // Exit code 0 = the user exited the local shell cleanly (exit/Ctrl+D):
+        // report 'shell-exited' so the tab auto-closes like SSH terminals.
+        reason: exitCode === 0 ? 'shell-exited' : `Process exited with code ${exitCode}`,
       });
       logger.info(`[Terminal] Local session ${sessionId} exited with code ${exitCode}`);
     });
@@ -551,12 +605,25 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
   });
 
   // ── SFTP handlers ──────────────────────────────────────────────────────
+  // v24: each handler retries once on a connection-style error (zombie
+  // connection / channel open failure) after invalidating the pooled
+  // connection, and error messages carry the host name so users can tell
+  // which machine failed.
 
   ipcMain.handle(CHANNELS.SFTP_LIST, async (_e, hostId: string, remotePath: string) => {
     ensureSftpCapable(hostId);
-    const mgr = await connectionPool.get(hostId);
-    const entries = await listDir(mgr, remotePath);
-    return entries as DirEntry[];
+    const hostName = hostsStore.get(hostId)?.name ?? hostId;
+    try {
+      const entries = await retrySftpOnce(
+        () => connectionPool.get(hostId),
+        () => connectionPool.invalidate(hostId),
+        (mgr) => listDir(mgr, remotePath),
+        isSshConnectionError,
+      );
+      return entries as DirEntry[];
+    } catch (err) {
+      throw new Error(`[${hostName}] ${(err as Error).message}`);
+    }
   });
 
   // Upload with cancel support
@@ -564,12 +631,12 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
     CHANNELS.SFTP_UPLOAD,
     async (_e, hostId: string, localPath: string, remotePath: string, transferId: string) => {
       ensureSftpCapable(hostId);
-      const mgr = await connectionPool.get(hostId);
+      const hostName = hostsStore.get(hostId)?.name ?? hostId;
       const controller = new AbortController();
       activeTransfers.set(transferId, controller);
 
-      try {
-        const result = await uploadFile(mgr, localPath, remotePath, {
+      const runUpload = (mgr: Awaited<ReturnType<typeof connectionPool.get>>) =>
+        uploadFile(mgr, localPath, remotePath, {
           signal: controller.signal,
           pool: connectionPool,
           hostId,
@@ -586,10 +653,20 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
             }
           },
         });
+
+      try {
+        const result = await retrySftpOnce(
+          () => connectionPool.get(hostId),
+          () => connectionPool.invalidate(hostId),
+          runUpload,
+          isSshConnectionError,
+        );
         logger.info(
           `[SFTP] Uploaded ${localPath} -> ${remotePath} (${result.bytesTransferred} bytes)`,
         );
         return result;
+      } catch (err) {
+        throw new Error(`[${hostName}] ${(err as Error).message}`);
       } finally {
         activeTransfers.delete(transferId);
       }
@@ -601,12 +678,12 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
     CHANNELS.SFTP_DOWNLOAD,
     async (_e, hostId: string, remotePath: string, localPath: string, transferId: string) => {
       ensureSftpCapable(hostId);
-      const mgr = await connectionPool.get(hostId);
+      const hostName = hostsStore.get(hostId)?.name ?? hostId;
       const controller = new AbortController();
       activeTransfers.set(transferId, controller);
 
-      try {
-        const result = await downloadFile(mgr, remotePath, localPath, {
+      const runDownload = (mgr: Awaited<ReturnType<typeof connectionPool.get>>) =>
+        downloadFile(mgr, remotePath, localPath, {
           signal: controller.signal,
           pool: connectionPool,
           hostId,
@@ -624,10 +701,20 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
             }
           },
         });
+
+      try {
+        const result = await retrySftpOnce(
+          () => connectionPool.get(hostId),
+          () => connectionPool.invalidate(hostId),
+          runDownload,
+          isSshConnectionError,
+        );
         logger.info(
           `[SFTP] Downloaded ${remotePath} -> ${localPath} (${result.bytesTransferred} bytes)`,
         );
         return result;
+      } catch (err) {
+        throw new Error(`[${hostName}] ${(err as Error).message}`);
       } finally {
         activeTransfers.delete(transferId);
       }
@@ -649,17 +736,29 @@ export function registerTerminalHandlers(win: BrowserWindow): void {
   // Resolve the home directory of the SSH user
   ipcMain.handle(CHANNELS.SFTP_REALPATH, async (_e, hostId: string) => {
     ensureSftpCapable(hostId);
-    const mgr = await connectionPool.get(hostId);
-    const sftp = await getSftp(mgr);
-    return new Promise<string>((resolve, reject) => {
-      sftp.realpath('.', (err, absPath) => {
-        if (err) {
-          reject(new Error(`realpath failed: ${err.message}`));
-        } else {
-          resolve(absPath);
-        }
-      });
-    });
+    const hostName = hostsStore.get(hostId)?.name ?? hostId;
+    try {
+      return await retrySftpOnce(
+        () => connectionPool.get(hostId),
+        () => connectionPool.invalidate(hostId),
+        (mgr) =>
+          getSftp(mgr).then(
+            (sftp) =>
+              new Promise<string>((resolve, reject) => {
+                sftp.realpath('.', (err, absPath) => {
+                  if (err) {
+                    reject(new Error(`realpath failed: ${err.message}`));
+                  } else {
+                    resolve(absPath);
+                  }
+                });
+              }),
+          ),
+        isSshConnectionError,
+      );
+    } catch (err) {
+      throw new Error(`[${hostName}] ${(err as Error).message}`);
+    }
   });
 
   // ── Native dialog handlers ──────────────────────────────────────────────

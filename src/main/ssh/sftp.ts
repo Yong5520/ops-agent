@@ -10,8 +10,41 @@ import type { ConnectionPool } from './pool.js';
 // SFTP operations — extracted from ssh-mcp-multi getSftp (lines 575-583) plus
 // the read-file / write-file / upload / download MCP tool implementations.
 
-// Open an SFTP session over the existing SSH connection.
+// ── SFTP channel management (v24) ─────────────────────────────────────────
+//
+// Every call used to open a NEW sftp channel and never end() it, so a
+// browsing session leaked one channel per list/realpath/upload/download
+// until the server's MaxSessions was exhausted and every later channel open
+// failed with "(SSH) Channel open failure: open failed". We now cache ONE
+// channel per connection manager. WeakMap keys die with the manager, so a
+// pool invalidation (new manager object) never sees a stale channel. The
+// channel dies with its underlying SSH connection; invalidateSftp() drops
+// it early when an operation reports the connection is a zombie.
+
+const sftpChannelCache = new WeakMap<SSHConnectionManager, SFTPWrapper>();
+// Dedupes concurrent openers (e.g. list + realpath racing on mount).
+const sftpInflight = new WeakMap<SSHConnectionManager, Promise<SFTPWrapper>>();
+
+// Open (or reuse) the cached SFTP session over the SSH connection.
 export async function getSftp(manager: SSHConnectionManager): Promise<SFTPWrapper> {
+  const cached = sftpChannelCache.get(manager);
+  if (cached) return cached;
+
+  const inflight = sftpInflight.get(manager);
+  if (inflight) return inflight;
+
+  const opening = openSftpChannel(manager);
+  sftpInflight.set(manager, opening);
+  try {
+    const sftp = await opening;
+    sftpChannelCache.set(manager, sftp);
+    return sftp;
+  } finally {
+    sftpInflight.delete(manager);
+  }
+}
+
+async function openSftpChannel(manager: SSHConnectionManager): Promise<SFTPWrapper> {
   await manager.ensureConnected();
   const conn = manager.getConnection();
   return new Promise<SFTPWrapper>((resolve, reject) => {
@@ -23,6 +56,22 @@ export async function getSftp(manager: SSHConnectionManager): Promise<SFTPWrappe
       }
     });
   });
+}
+
+/**
+ * Drop the manager's cached SFTP channel (ending it) so the next getSftp
+ * opens a fresh one. Call this when an SFTP operation failed in a way that
+ * suggests the channel/connection is dead - the retry path then rebuilds.
+ */
+export function invalidateSftp(manager: SSHConnectionManager): void {
+  const cached = sftpChannelCache.get(manager);
+  if (!cached) return;
+  sftpChannelCache.delete(manager);
+  try {
+    cached.end();
+  } catch {
+    // Channel may already be dead - nothing to do.
+  }
 }
 
 // ── read_file ─────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { useTerminalStore } from '../../store/terminalStore.js';
 import { decideRightClickAction } from '../../lib/terminal-right-click.js';
-import { decideCtrlCAction } from '../../lib/terminal-keyboard.js';
+import { decideTerminalKeyAction } from '../../lib/terminal-keyboard.js';
 import '@xterm/xterm/css/xterm.css';
 
 interface TerminalViewProps {
@@ -199,8 +199,7 @@ export function TerminalView({
   const fitRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
-  const { updateTabStatus, tabs, broadcastMode, rightClickMode, setRightClickMode } =
-    useTerminalStore();
+  const { updateTabStatus, tabs, broadcastMode } = useTerminalStore();
   const [showSearch, setShowSearch] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, visible: false });
   const [copiedFlash, setCopiedFlash] = useState(false);
@@ -314,6 +313,11 @@ export function TerminalView({
     // Listen for stream exit
     const removeExitListener = window.opsAgent.terminal.onExit((sid, info) => {
       if (sid === sessionId) {
+        if (info.reason === 'shell-exited') {
+          // The tab/window is being auto-closed by the page-level listener -
+          // nothing to render into it.
+          return;
+        }
         if (info.reason === 'reconnecting') {
           term.write('\r\n\x1b[33m[正在重连...]\x1b[0m\r\n');
           updateTabStatus(sessionId, 'reconnecting');
@@ -348,45 +352,29 @@ export function TerminalView({
     });
     resizeObserver.observe(containerRef.current);
 
-    // Ctrl+F to search, Ctrl+Shift+C/V for copy/paste, Ctrl+I to toggle AI bar
+    // Ctrl+F to search, Ctrl+Shift+C/V for copy/paste, Ctrl+I to toggle AI
+    // bar. All the routing logic - including the once-per-press gating for
+    // discrete actions and the deliberately ungated SIGINT path (holding
+    // Ctrl+C keeps sending \x03) - lives in the pure, unit-tested
+    // decideTerminalKeyAction(); this handler is only a thin dispatcher.
+    // xterm invokes it for keydown, keyup AND keypress, and auto-repeats
+    // keydown while a key is held; those map to 'xterm-suppress' so the combo
+    // is still preventDefault()-ed (no \x16 to the shell) without re-firing
+    // the action.
     // (attachCustomKeyEventHandler returns void - handler is disposed with terminal)
     term.attachCustomKeyEventHandler((e) => {
-      if (e.ctrlKey && e.key === 'f') {
-        e.preventDefault();
-        setShowSearch(true);
-        return false;
-      }
-      if (e.ctrlKey && e.key === 'i') {
-        e.preventDefault();
-        onToggleAiBar();
-        return false;
-      }
-      if (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
-        e.preventDefault();
-        const selection = term.getSelection();
-        if (selection) {
-          window.opsAgent.clipboard.writeText(selection);
-          flashCopied();
-        }
-        return false;
-      }
-      if (e.ctrlKey && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-        e.preventDefault();
-        const text = window.opsAgent.clipboard.readText();
-        if (text) {
-          // term.paste applies xterm's paste transforms (CRLF->CR + bracketed
-          // paste wrapping using xterm's authoritative mode) and fires onData
-          // once, which the onData handler sends to the SSH shell.
-          term.paste(text);
-        }
-        return false;
-      }
-      // Plain Ctrl+C (no Shift): jumpserver-style - copy when there is a
-      // selection, otherwise let xterm send SIGINT (\x03). The Shift variant
-      // above handles explicit copy, so require !shiftKey to avoid conflict.
-      if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
-        if (decideCtrlCAction(term.hasSelection()) === 'copy') {
-          e.preventDefault();
+      const action = decideTerminalKeyAction(e, term.hasSelection());
+      // Let xterm process the event normally (SIGINT \x03 or default input).
+      if (action === 'xterm-default' || action === 'sigint') return true;
+      e.preventDefault();
+      switch (action) {
+        case 'search':
+          setShowSearch(true);
+          return false;
+        case 'toggle-ai':
+          onToggleAiBar();
+          return false;
+        case 'copy': {
           const selection = term.getSelection();
           if (selection) {
             window.opsAgent.clipboard.writeText(selection);
@@ -394,13 +382,21 @@ export function TerminalView({
           }
           return false;
         }
-        return true;
+        case 'paste': {
+          // term.paste applies xterm's paste transforms (CRLF->CR + bracketed
+          // paste wrapping using xterm's authoritative mode) and fires onData
+          // once, which the onData handler sends to the SSH shell.
+          const text = window.opsAgent.clipboard.readText();
+          if (text) {
+            term.paste(text);
+          }
+          return false;
+        }
+        // Recognized combo on a non-initial event (keyup/keypress/repeat):
+        // suppress xterm's control code but do not re-run the action.
+        case 'xterm-suppress':
+          return false;
       }
-      // Plain Ctrl+V (no Shift): let xterm handle it natively. xterm's paste
-      // event applies the same transforms as term.paste() and fires onData
-      // once. Intercepting Ctrl+V here would double-paste (our call plus the
-      // browser's paste event), so we deliberately do NOT intercept it.
-      return true;
     });
 
     term.focus();
@@ -461,18 +457,17 @@ export function TerminalView({
   };
 
   // MobaXterm/jumpserver-style quick copy/paste (right-click without the menu).
-  // With a selection: copy it to the clipboard AND insert it at the cursor so a
-  // highlighted snippet drops straight onto the command line. Without a
+  // With a selection: copy it to the clipboard AND clear the selection, so the
+  // next right-click (no selection now) pastes - the two-step flow. Without a
   // selection: paste from the clipboard.
-  const handleQuickCopyAndInsert = () => {
+  const handleQuickCopy = () => {
     const selection = termRef.current?.getSelection();
     if (selection) {
       window.opsAgent.clipboard.writeText(selection);
       flashCopied();
-      // Insert the selected text at the cursor via xterm's paste path (applies
-      // paste transforms, so a multi-line selection is inserted as one blob
-      // when the shell has bracketed paste mode enabled).
-      termRef.current?.paste(selection);
+      // Clear the selection so the second right-click routes to paste instead
+      // of copying the same text again.
+      termRef.current?.clearSelection();
     }
     termRef.current?.focus();
   };
@@ -507,14 +502,10 @@ export function TerminalView({
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    const action = decideRightClickAction(
-      !!termRef.current?.hasSelection(),
-      rightClickMode,
-      e.shiftKey,
-    );
+    const action = decideRightClickAction(!!termRef.current?.hasSelection(), e.shiftKey);
     switch (action) {
-      case 'copyAndInsert':
-        handleQuickCopyAndInsert();
+      case 'copy':
+        handleQuickCopy();
         return;
       case 'paste':
         handleQuickPaste();
@@ -555,21 +546,7 @@ export function TerminalView({
         <span>{hostName}</span>
         <div className="flex items-center gap-2">
           {broadcastMode && isActive && <span className="text-amber-400">📡 广播模式</span>}
-          <button
-            onClick={() => setRightClickMode(rightClickMode === 'quick' ? 'menu' : 'quick')}
-            className={
-              rightClickMode === 'quick'
-                ? 'text-indigo-400 hover:text-indigo-300'
-                : 'text-zinc-600 hover:text-zinc-300'
-            }
-            title={
-              rightClickMode === 'quick'
-                ? '右键: 快速复制/粘贴 (Shift+右键 打开菜单) — 点击切换为菜单模式'
-                : '右键: 菜单模式 — 点击切换为快速复制/粘贴'
-            }
-          >
-            {rightClickMode === 'quick' ? '⧉' : '☰'}
-          </button>
+          <span title="右键: 快速复制/粘贴 (Shift+右键 打开菜单)">⧉</span>
           <button
             onClick={() => setShowSearch(true)}
             className="text-zinc-600 hover:text-zinc-300"

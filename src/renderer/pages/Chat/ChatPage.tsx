@@ -14,8 +14,6 @@ import { useHostStore } from '../../store/hostStore.js';
 import { useUiStore } from '../../store/uiStore.js';
 import { Button } from '../../components/Button.js';
 import { SessionModelSelector } from './SessionModelSelector.js';
-import { AiActivityTerminal } from './AiActivityTerminal.js';
-import { useActivityTerminalStore } from '../../store/activityTerminalStore.js';
 import type { Message } from '../../../shared/types.js';
 
 interface PendingPlanApproval {
@@ -49,9 +47,6 @@ export function ChatPage() {
   } = useAgentStore();
   const { activeProvider, providers, load: loadModels } = useModelStore();
   const { hosts, load: loadHosts } = useHostStore();
-  const activityOpen = useActivityTerminalStore((s) => s.isOpen);
-  const openActivity = useActivityTerminalStore((s) => s.open);
-  const closeActivity = useActivityTerminalStore((s) => s.close);
   const [editFromMessage, setEditFromMessage] = useState<Message | null>(null);
   const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
 
@@ -389,7 +384,7 @@ export function ChatPage() {
       id: execMsgId,
       sessionId,
       role: 'system',
-      content: `⏳ 正在 ${hostName ? hostName : '默认主机'} 上执行: \`${command}\``,
+      content: `⏳ 正在 ${hostName ? hostName : '会话选中的主机'} 上执行: \`${command}\``,
       createdAt: new Date().toISOString(),
     });
 
@@ -489,7 +484,7 @@ export function ChatPage() {
             <Button
               variant="primary"
               size="sm"
-              onClick={() => createSession({ hostIds, safetyMode })}
+              onClick={() => createSession({ hostIds: [], safetyMode })}
             >
               + 新建会话
             </Button>
@@ -594,9 +589,9 @@ export function ChatPage() {
             )}
             <Button
               size="sm"
-              variant={activityOpen ? 'primary' : 'ghost'}
-              onClick={activityOpen ? closeActivity : openActivity}
-              title="打开/关闭 AI 活动终端(只读实时回放 AI 执行的命令与输出)"
+              variant="ghost"
+              onClick={() => window.opsAgent.agent.openMirrorWindow(currentSession?.id)}
+              title="在新窗口打开 AI 活动终端(只读实时镜像 AI 执行的命令与原始输出)"
             >
               活动终端
             </Button>
@@ -649,13 +644,6 @@ export function ChatPage() {
           onMentionHost={handleMentionHost}
         />
       </div>
-
-      {/* AI activity terminal - read-only real-time mirror of AI commands/output */}
-      {activityOpen && (
-        <div className="flex w-[30rem] min-w-0 min-h-0 flex-col border-l border-zinc-800">
-          <AiActivityTerminal onClose={closeActivity} />
-        </div>
-      )}
 
       {/* Authorization dialog (modal) */}
       <AuthDialog />

@@ -2,49 +2,46 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import {
-  useActivityTerminalStore,
-  eventMatchesHost,
+  useActivityMirrorStore,
+  eventMatchesView,
   ALL_HOSTS,
-  type ActivityEvent,
-} from '../../store/activityTerminalStore.js';
+} from '../../store/activityMirrorStore.js';
 import { formatActivityEvent } from '../../lib/ai-activity-formatter.js';
-import { useSessionStore } from '../../store/sessionStore.js';
 import { useHostStore } from '../../store/hostStore.js';
+import type { AgentMirrorEvent } from '../../../shared/activity-mirror-types.js';
 import '@xterm/xterm/css/xterm.css';
 
 interface AiActivityTerminalProps {
+  /** Session this window mirrors ('' = every session). */
+  sessionId: string;
   onClose: () => void;
 }
 
-// Read-only xterm panel that mirrors, in real time, the commands the AI runs
-// and their streamed output. It subscribes to the existing agent tool-call /
-// tool-result events (no IPC additions, no exec-path changes) and replays them
-// through the pure `formatActivityEvent` formatter.
+// Read-only xterm panel that mirrors, in real time, the RAW bytes the AI's
+// exec channels send and receive (v24, plan option c). The main-process
+// activity-mirror ring taps executor.ts / serial exec and broadcasts command
+// boundaries + uncleaned chunks + finals; this window replays buffered history
+// on mount then appends live events.
 //
 // Read-only by construction: `term.onData` is NEVER wired, so there is no input
 // path. The cursor is hidden for a display-only feel; selection/copy still work.
-export function AiActivityTerminal({ onClose }: AiActivityTerminalProps) {
+export function AiActivityTerminal({ sessionId, onClose }: AiActivityTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  // Highest event seq already written for the current (session, host) view.
+  // Highest event seq already written for the current host view.
   const lastSeqRef = useRef(0);
-  // The (session, host) view currently rendered. A change triggers a full
-  // reset + replay; otherwise we write only newly-arrived matching events.
-  const viewRef = useRef<{ sessionId: string; hostId: string } | null>(null);
+  // The host view currently rendered. A change triggers a full reset + replay;
+  // otherwise we write only newly-arrived matching events.
+  const viewRef = useRef<string | null>(null);
 
-  const events = useActivityTerminalStore((s) => s.events);
-  const selectedHostId = useActivityTerminalStore((s) => s.selectedHostId);
-  const selectHost = useActivityTerminalStore((s) => s.selectHost);
-  const clear = useActivityTerminalStore((s) => s.clear);
-  const currentSessionId = useSessionStore((s) => s.currentSession?.id ?? '');
-  const hostIds = useSessionStore((s) => s.hostIds);
+  const events = useActivityMirrorStore((s) => s.events);
+  const selectedHostId = useActivityMirrorStore((s) => s.selectedHostId);
+  const selectHost = useActivityMirrorStore((s) => s.selectHost);
+  const setEvents = useActivityMirrorStore((s) => s.setEvents);
+  const append = useActivityMirrorStore((s) => s.append);
+  const clear = useActivityMirrorStore((s) => s.clear);
   const hosts = useHostStore((s) => s.hosts);
-
-  // Hosts available to watch = the session's selected hosts (with names).
-  const watchableHosts = hostIds
-    .map((id) => hosts.find((h) => h.id === id))
-    .filter((h): h is NonNullable<typeof h> => !!h);
 
   // Create the xterm instance once. Mirrors TerminalView's setup minus the
   // input/paste/search wiring (this panel is display-only).
@@ -104,37 +101,46 @@ export function AiActivityTerminal({ onClose }: AiActivityTerminalProps) {
     };
   }, []);
 
-  // Forward agent events into the store (passive subscriber). Runs once; the
-  // store is read fresh inside the handler so it always sees the latest state.
+  // Seed the buffer from the main-process ring (history replay) and subscribe
+  // to live mirror events. Runs once on mount.
   useEffect(() => {
-    const offCall = window.opsAgent.agent.onToolCall((event) => {
-      useActivityTerminalStore.getState().recordToolCall(event);
-    });
-    const offResult = window.opsAgent.agent.onToolResult((event) => {
-      useActivityTerminalStore.getState().recordToolResult(event);
+    let cancelled = false;
+    // Seed: fetch history scoped to this window's session + the ALL_HOSTS view
+    // (the host filter is applied client-side at render time).
+    window.opsAgent.agent
+      .mirrorHistory(sessionId || undefined, ALL_HOSTS)
+      .then((history) => {
+        if (!cancelled && history.length > 0) setEvents(history);
+      })
+      .catch(() => {
+        // History is best-effort; live events still flow.
+      });
+    const off = window.opsAgent.agent.onMirrorEvent((event) => {
+      // Only accept events for this window's session (empty sessionId = all).
+      if (sessionId && event.sessionId !== sessionId) return;
+      append(event);
     });
     return () => {
-      offCall();
-      offResult();
+      cancelled = true;
+      off();
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
-  // Render: full replay on (session|host) view change, else incremental write
-  // of only the newly-arrived matching events. Incremental is required so a
-  // streaming `tail -f` doesn't reset+replay the whole log on every chunk.
+  // Render: full replay on host-view change, else incremental write of only the
+  // newly-arrived matching events. Incremental is required so a streaming output
+  // doesn't reset+replay the whole log on every chunk.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
 
-    const matches = (e: ActivityEvent): boolean =>
-      e.sessionId === currentSessionId && eventMatchesHost(e, selectedHostId);
+    const matches = (e: AgentMirrorEvent): boolean =>
+      eventMatchesView(e, sessionId, selectedHostId);
 
-    const viewChanged =
-      viewRef.current?.sessionId !== currentSessionId ||
-      viewRef.current?.hostId !== selectedHostId;
+    const viewChanged = viewRef.current !== selectedHostId;
 
     if (viewChanged) {
-      viewRef.current = { sessionId: currentSessionId, hostId: selectedHostId };
+      viewRef.current = selectedHostId;
       term.reset();
       term.write('\x1b[?25l');
       const matching = events.filter(matches);
@@ -152,12 +158,12 @@ export function AiActivityTerminal({ onClose }: AiActivityTerminalProps) {
     if (newEvents.length > 0) {
       lastSeqRef.current = newEvents[newEvents.length - 1].seq;
     }
-  }, [events, currentSessionId, selectedHostId]);
+  }, [events, sessionId, selectedHostId]);
 
   const handleClear = () => {
     clear();
     lastSeqRef.current = 0;
-    viewRef.current = { sessionId: currentSessionId, hostId: selectedHostId };
+    viewRef.current = selectedHostId;
     termRef.current?.reset();
     termRef.current?.write('\x1b[?25l');
   };
@@ -168,11 +174,15 @@ export function AiActivityTerminal({ onClose }: AiActivityTerminalProps) {
     termRef.current?.focus();
   };
 
+  const watchableHosts = hosts;
+
   return (
     <div className="flex h-full w-full flex-col bg-[#0a0a0a]">
       <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
         <span className="text-xs font-medium text-zinc-300">AI 活动终端</span>
-        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">只读</span>
+        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">
+          只读 · 实时镜像
+        </span>
         <select
           value={selectedHostId}
           onChange={(e) => selectHost(e.target.value)}

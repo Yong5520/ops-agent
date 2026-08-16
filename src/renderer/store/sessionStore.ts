@@ -66,7 +66,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       sessions: [session, ...get().sessions],
       currentSession: session,
       messages: [],
-      hostIds: params?.hostIds ?? get().hostIds,
+      // v24: a brand-new session starts with NO hosts selected. The store's
+      // hostIds is shared across sessions, so inheriting it here silently
+      // pre-selected the previous session's hosts. Explicit hostIds (e.g. the
+      // @mention flow) are still honored.
+      hostIds: params?.hostIds ?? [],
       safetyMode: params?.safetyMode ?? 'operator',
     });
     return session;

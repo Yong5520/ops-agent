@@ -144,6 +144,11 @@ export class SSHConnectionManager extends EventEmitter {
   private hostKeyMismatch: { expected: string; actual: string } | null = null;
   private state: ConnectionState = 'disconnected';
 
+  // v24 activity mirror: session context stamped by the agent tools before
+  // each exec so raw-chunk mirror events can be scoped to a session in the
+  // UI. Defaults to '' (events land in a shared bucket every view can show).
+  mirrorSessionId: string = '';
+
   constructor(
     public readonly hostId: string,
     public readonly hostName: string,
@@ -151,6 +156,11 @@ export class SSHConnectionManager extends EventEmitter {
   ) {
     super();
     this.config = config;
+  }
+
+  /** id alias used by the activity-mirror tap (executor records hostId). */
+  get id(): string {
+    return this.hostId;
   }
 
   get timeout(): number {

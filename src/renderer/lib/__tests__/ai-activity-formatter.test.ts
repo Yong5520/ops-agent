@@ -1,16 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { formatActivityEvent } from '../ai-activity-formatter.js';
-import type { ActivityEvent } from '../../store/activityTerminalStore.js';
+import { formatActivityEvent, type FormattedEvent } from '../ai-activity-formatter.js';
 
 const CRLF = '\r\n';
 
-function command(over: Partial<Extract<ActivityEvent, { kind: 'command' }>> = {}): ActivityEvent {
+function command(over: Partial<Extract<FormattedEvent, { kind: 'command' }>> = {}): FormattedEvent {
   return {
     kind: 'command',
     seq: 1,
-    sessionId: 's1',
-    toolCallId: 't1',
-    hostId: 'h1',
     hostName: 'host1',
     toolName: 'exec',
     command: 'ls -la',
@@ -20,13 +16,10 @@ function command(over: Partial<Extract<ActivityEvent, { kind: 'command' }>> = {}
   };
 }
 
-function final(over: Partial<Extract<ActivityEvent, { kind: 'final' }>> = {}): ActivityEvent {
+function final(over: Partial<Extract<FormattedEvent, { kind: 'final' }>> = {}): FormattedEvent {
   return {
     kind: 'final',
     seq: 3,
-    sessionId: 's1',
-    toolCallId: 't1',
-    hostId: 'h1',
     success: true,
     exitCode: 0,
     durationMs: 42,
@@ -54,10 +47,6 @@ describe('formatActivityEvent', () => {
     const out = formatActivityEvent({
       kind: 'chunk',
       seq: 2,
-      sessionId: 's1',
-      toolCallId: 't1',
-      hostId: 'h1',
-      stream: 'stdout',
       data: 'hello world\n',
     });
     expect(out).toBe('hello world\n');
@@ -99,15 +88,11 @@ describe('formatActivityEvent', () => {
   it('full replay equals the concatenation of per-event formatting', () => {
     // The component relies on: replay = events.map(format).join(''), and
     // incremental = format(newEvent). Verify they compose consistently.
-    const events: ActivityEvent[] = [
+    const events: FormattedEvent[] = [
       command(),
       {
         kind: 'chunk',
         seq: 2,
-        sessionId: 's1',
-        toolCallId: 't1',
-        hostId: 'h1',
-        stream: 'stdout',
         data: 'out\n',
       },
       final(),

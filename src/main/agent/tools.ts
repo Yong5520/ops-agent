@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { tool } from 'ai';
 import { connectionPool, execCommand, readFile, writeFile } from '../ssh/index.js';
+import { isSshConnectionError } from '../ssh/connection-errors.js';
 import {
   runHostCommand,
   runHostSudoCommand,
@@ -487,6 +488,8 @@ export function createTools(deps: ToolFactoryDeps) {
           });
         },
         abortController.signal,
+        context.sessionId,
+        toolName,
       );
       const success = hostCommandSucceeded(host, result);
 
@@ -666,18 +669,25 @@ export function createTools(deps: ToolFactoryDeps) {
           // to the existing card's output instead of replacing.
           const result = await withRetry(
             () =>
-              runHostCommand(host, effectiveCommand, (chunk) => {
-                hasStreamedOutput = true;
-                onToolResult({
-                  toolCallId,
-                  toolName: 'exec',
-                  success: true,
-                  stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
-                  stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
-                  authorization: pre.authorization,
-                  partial: true,
-                });
-              }),
+              runHostCommand(
+                host,
+                effectiveCommand,
+                (chunk) => {
+                  hasStreamedOutput = true;
+                  onToolResult({
+                    toolCallId,
+                    toolName: 'exec',
+                    success: true,
+                    stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
+                    stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
+                    authorization: pre.authorization,
+                    partial: true,
+                  });
+                },
+                undefined,
+                context.sessionId,
+                'exec',
+              ),
             { maxRetries: 2, delays: [1000, 2000], hasSideEffects: () => hasStreamedOutput },
           );
           const success = hostCommandSucceeded(host, result);
@@ -957,17 +967,24 @@ export function createTools(deps: ToolFactoryDeps) {
             }
             const release = await guard.acquireRead();
             try {
-              const result = await runHostCommand(h, sanitized, (chunk) => {
-                onToolResult({
-                  toolCallId: perHostId,
-                  toolName: 'exec_multi',
-                  success: true,
-                  stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
-                  stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
-                  authorization: 'auto',
-                  partial: true,
-                });
-              });
+              const result = await runHostCommand(
+                h,
+                sanitized,
+                (chunk) => {
+                  onToolResult({
+                    toolCallId: perHostId,
+                    toolName: 'exec_multi',
+                    success: true,
+                    stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
+                    stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
+                    authorization: 'auto',
+                    partial: true,
+                  });
+                },
+                undefined,
+                context.sessionId,
+                'exec_multi',
+              );
               const success = hostCommandSucceeded(h, result);
               onToolResult({
                 toolCallId: perHostId,
@@ -1161,18 +1178,24 @@ export function createTools(deps: ToolFactoryDeps) {
           let hasStreamedOutput = false;
           const result = await withRetry(
             () =>
-              runHostSudoCommand(host, effectiveCommand, (chunk) => {
-                hasStreamedOutput = true;
-                onToolResult({
-                  toolCallId,
-                  toolName: 'sudo_exec',
-                  success: true,
-                  stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
-                  stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
-                  authorization: pre.authorization,
-                  partial: true,
-                });
-              }),
+              runHostSudoCommand(
+                host,
+                effectiveCommand,
+                (chunk) => {
+                  hasStreamedOutput = true;
+                  onToolResult({
+                    toolCallId,
+                    toolName: 'sudo_exec',
+                    success: true,
+                    stdout: chunk.stream === 'stdout' ? chunk.data : undefined,
+                    stderr: chunk.stream === 'stderr' ? chunk.data : undefined,
+                    authorization: pre.authorization,
+                    partial: true,
+                  });
+                },
+                undefined,
+                context.sessionId,
+              ),
             { maxRetries: 2, delays: [1000, 2000], hasSideEffects: () => hasStreamedOutput },
           );
           const success = hostCommandSucceeded(host, result);
@@ -2008,29 +2031,10 @@ function isTransientError(err: Error): boolean {
 }
 
 // Check if an error indicates the SSH connection is broken and should be
-// invalidated. This covers zombie connections where the TCP socket is alive
-// but the SSH session layer is unusable.
-//
-// IMPORTANT: OpsAgentError stores the error category in `.code` (e.g.
-// 'SSH_TIMEOUT'), not in `.message`. The message text is user-facing (e.g.
-// "Command timed out after 60000ms") and does NOT contain the code string.
-// We must check both .code and .message to catch all cases.
-function isConnectionError(err: Error): boolean {
-  // Check OpsAgentError.code first (authoritative category).
-  const code = (err as { code?: string }).code;
-  if (code === 'SSH_TIMEOUT' || code === 'SSH_NOT_CONNECTED') return true;
-
-  const msg = err.message;
-  if (msg.includes('channel') || msg.includes('Channel')) return true;
-  if (msg.includes('MaxSessions')) return true;
-  if (msg.includes('ECONNRESET')) return true;
-  if (msg.includes('EPIPE')) return true;
-  if (msg.includes('Socket closed')) return true;
-  if (msg.includes('Keepalive timeout')) return true;
-  if (msg.includes('Command timed out')) return true;
-  if (msg.includes('Connection lost')) return true;
-  return false;
-}
+// invalidated. Connection-error detection now lives in
+// ../ssh/connection-errors.ts (shared with the terminal SFTP handlers, v24).
+// Kept as a local alias so the call sites below stay unchanged.
+const isConnectionError = isSshConnectionError;
 
 // Retry wrapper with exponential backoff. Only retries transient errors.
 // IMPORTANT: retries only if no output was streamed — if the command started
